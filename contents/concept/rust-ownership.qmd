@@ -1,0 +1,273 @@
+---
+title: "Rust Ownership"
+---
+
+## 1. Memory is a big array of bytes
+
+At the lowest level, RAM is one long array of bytes, each with a numeric address. A "pointer" is just a number that holds one of those addresses.
+
+```
+ Address:  0x1000 0x1001 0x1002 0x1003 0x1004 ...
+          ┌──────┬──────┬──────┬──────┬──────┬─────
+ RAM:     │  68  │  65  │  6C  │  6C  │  6F  │ ...
+          └──────┴──────┴──────┴──────┴──────┴─────
+             'h'    'e'    'l'    'l'    'o'
+```
+
+Every program has to answer: who decides which bytes are in use, and when can they be reused?
+
+## 2. Two regions: the stack and the heap
+
+A running program splits its memory into two main regions with very different rules.
+
+```
+ ┌─────────────── STACK ───────────────┐   ┌──────────────── HEAP ────────────────┐
+ │ • One "frame" per function call     │   │ • A big pool managed by an allocator │
+ │ • Size of everything known at       │   │ • Size can be decided at runtime     │
+ │   compile time                      │   │ • You ASK for N bytes, you get back  │
+ │ • LIFO: push on call, pop on return │   │   an address (pointer)               │
+ │ • Cleanup is automatic and free     │   │ • Block stays reserved until someone │
+ │   (just move the stack pointer)     │   │   explicitly GIVES IT BACK           │
+ │ • Very fast                         │   │ • Slower, flexible                   │
+ └─────────────────────────────────────┘   └──────────────────────────────────────┘
+```
+
+An `i32` is always 4 bytes, so it lives entirely on the stack. But a `String` can grow ("hi" → "hello world"), so its text must live on the heap. A `String` is therefore a two-part object:
+
+```
+        STACK (inside main's frame)              HEAP
+        ┌──────────────────────────┐
+  s ──▶ │ ptr ─────────────────────┼────▶ ┌───┬───┬───┬───┬───┐
+        │ len = 5                  │      │ h │ e │ l │ l │ o │
+        │ cap = 5                  │      └───┴───┴───┴───┴───┘
+        └──────────────────────────┘       (block allocated at runtime)
+         fixed 24 bytes (on 64-bit)
+```
+
+This picture is the key to everything that follows. The stack part disappears automatically when the function returns. The heap part does not, because the stack has no idea it exists.
+
+## 3. What "memory freed" means
+
+"Freeing" means telling the allocator: "this heap block is no longer needed, you may hand it out again." Stack memory never needs this; heap memory always does. Getting it wrong produces three classic bugs:
+
+```
+ ┌────────────────────┬────────────────────────────────┬──────────────────────────┐
+ │ Bug                │ What happened                  │ Consequence              │
+ ├────────────────────┼────────────────────────────────┼──────────────────────────┤
+ │ Memory leak        │ Never freed                    │ RAM usage grows forever  │
+ │ Double free        │ Freed twice                    │ Allocator corruption,    │
+ │                    │                                │ crashes, security holes  │
+ │ Use-after-free     │ Freed, then read/written       │ Reading garbage or       │
+ │ (dangling pointer) │ through an old pointer         │ someone else's data      │
+ └────────────────────┴────────────────────────────────┴──────────────────────────┘
+```
+
+So the real design question for any language is: who frees each heap block, and exactly when?
+
+## 4. How the languages you know answer that question
+
+| Language | Strategy | Cost |
+|---|---|---|
+| C | You call `malloc` and `free` by hand | Zero overhead, but every bug above is possible |
+| Python, R | Reference counting (plus a cycle collector) | Each object carries a counter updated at runtime |
+| C#, Dart, JS | Tracing garbage collector | A runtime periodically scans memory; pauses and extra RAM |
+| Rust | Ownership rules checked by the compiler | Zero runtime cost; the compiler inserts `free` for you |
+
+In C#, when you write `var b = a;` for a `List<string>`, both variables point to the same object, and the GC figures out later when nobody points to it anymore. Rust wants the safety of the GC languages with the speed of C, and it gets there by making the "who frees it" answer knowable at compile time. That is what ownership is.
+
+## 5. Scope
+
+A scope is the region of source code in which a variable name is valid: from the `let` until the closing `}` of the block it was declared in.
+
+```rust
+fn main() {                            // ── main's scope begins
+    let a = 1;                         //  ┐ a is valid
+    {                                  //  │ ── inner block begins
+        let b = String::from("hi");    //  │  ┐ b is valid
+        println!("{a} {b}");           //  │  │
+    }                                  //  │  ┘ b's scope ENDS here
+    // println!("{b}");  ✗ error       //  │   (b no longer exists)
+    println!("{a}");                   //  │
+}                                      //  ┘ a's scope ENDS here
+```
+
+The important property is that scope is lexical: it is determined by the text of the program, not by what happens at runtime. That means the compiler knows, for every variable, the exact line where it stops existing. This is what lets Rust schedule cleanup without a runtime GC.
+
+## 6. Owner
+
+The owner of a value is the variable responsible for cleaning it up. When you write `let s = String::from("hello");`, the variable `s` owns that `String`, and the `String` in turn owns its heap buffer. Ownership forms a tree:
+
+```
+  let v: Vec<String> = vec!["ab".into(), "cd".into()];
+
+  v (owner, on stack)
+  └── owns ──▶ heap buffer of the Vec
+                ├── String #0 ── owns ──▶ heap "ab"
+                └── String #1 ── owns ──▶ heap "cd"
+
+  When v is dropped → the Vec drops each String → each String frees its bytes.
+  One drop at the root cleans the whole tree.
+```
+
+You can think of the owner as the one name that holds the "free this" duty. Other code may look at the value (borrowing), but only the owner's scope end triggers cleanup.
+
+## 7. Rule 2: when the owner's scope ends, the value is dropped
+
+At every closing `}`, the compiler inserts a call to `drop` for each owned value going out of scope, in reverse order of declaration. For a `String`, `drop` calls the allocator to free the heap buffer.
+
+```rust
+struct Noisy(&'static str);
+
+impl Drop for Noisy {
+    fn drop(&mut self) { println!("drop {}", self.0); }
+}
+
+fn main() {
+    let _a = Noisy("a");
+    {
+        let _b = Noisy("b");
+        println!("inner scope ends");
+    }                                   // ← compiler inserts drop(_b)
+    let _c = Noisy("c");
+    println!("main ends");
+}                                       // ← compiler inserts drop(_c), drop(_a)
+```
+
+```
+Output:
+  inner scope ends
+  drop b
+  main ends
+  drop c
+  drop a
+```
+
+If you know C#, this is like every variable automatically being wrapped in a `using` block, with `Drop` playing the role of `IDisposable.Dispose()`. In Python it's like an implicit `with`. The pattern is called RAII, and it applies to more than memory: a `File` closes itself, a `MutexGuard` unlocks itself, a network socket disconnects itself, all deterministically at scope end.
+
+## 8. Rule 1: why exactly one owner?
+
+Consider what would happen if Rust behaved like Python here:
+
+```rust
+let s1 = String::from("hello");
+let s2 = s1;
+```
+
+```
+ IF Rust copied the stack header and kept both valid (Python-style):
+
+   s1 ┌─────────┐
+      │ ptr ────┼──┐
+      └─────────┘  ├──▶ heap "hello"
+   s2 ┌─────────┐  │
+      │ ptr ────┼──┘
+      └─────────┘
+
+   End of scope: drop(s2) frees "hello"
+                 drop(s1) frees "hello" AGAIN   ✗ DOUBLE FREE
+```
+
+Python avoids this with a runtime reference counter. Rust refuses to pay that runtime cost, so it chooses a different meaning for `=`: it moves ownership.
+
+```
+ What Rust actually does (MOVE):
+
+   s1 ┌─────────┐
+      │ (moved) │  ✗ compiler marks s1 as unusable
+      └─────────┘
+   s2 ┌─────────┐
+      │ ptr ────┼────▶ heap "hello"     ← exactly one owner
+      └─────────┘
+
+   End of scope: drop(s2) frees "hello"
+                 s1 was moved → nothing to drop       ✓
+```
+
+The 24-byte header is copied (cheap), but the old name is invalidated. If you try to use it, the compiler stops you:
+
+```rust
+let s1 = String::from("hello");
+let s2 = s1;
+println!("{s1}");   // error[E0382]: borrow of moved value: `s1`
+```
+
+Two related cases complete the picture. Types that live entirely on the stack (`i32`, `f64`, `bool`, `char`, and tuples of those) implement `Copy`: copying the bits is a complete, independent copy, so there's no double-free risk and `let y = x;` leaves both usable. And when you genuinely want two independent heap strings, you ask for it explicitly with `let s2 = s1.clone();`, which allocates a second buffer, so now there are two values, each with its own single owner.
+
+Passing to a function is also a move:
+
+```rust
+fn takes(s: String) {        // s becomes the owner
+    println!("{s}");
+}                             // ← drop(s): heap freed here
+
+fn main() {
+    let name = String::from("KS");
+    takes(name);              // ownership moves into the function
+    // println!("{name}");    ✗ error: name was moved
+}
+```
+
+Here's a step-through tying scope, owner, move, clone, and drop together. Use the buttons to walk line by line and watch both memory regions.
+
+## 9. Rule 3: borrowing (temporary access without ownership)
+
+Moving into every function and returning it back would be exhausting. Borrowing lets code use a value without taking over the cleanup duty. A reference (`&s`) is a pointer that does not own anything, so when a reference goes out of scope, nothing is freed.
+
+```rust
+fn length(s: &String) -> usize {   // borrows, does not own
+    s.len()
+}                                   // s (the reference) ends → nothing freed
+
+fn main() {
+    let name = String::from("Lightbridge");
+    let n = length(&name);          // lend it out
+    println!("{name} has {n} chars"); // ✓ still the owner
+}
+```
+
+```
+   name (OWNER) ┌──────────┐
+                │ ptr ─────┼──────▶ heap "Lightbridge"
+                └──────────┘            ▲
+   s (BORROW)   ┌──────────┐            │
+                │ ptr ─────┼────────────┘   no drop duty
+                └──────────┘
+```
+
+Borrowing has two rules, enforced at compile time. First, at any moment you may have either many shared borrows (`&T`, read-only) or exactly one mutable borrow (`&mut T`), never both. Second, a borrow can never outlive its owner, which is how Rust eliminates use-after-free:
+
+```rust
+let r;
+{
+    let s = String::from("hi");
+    r = &s;
+}                       // s dropped here, heap freed
+println!("{r}");        // error[E0597]: `s` does not live long enough
+```
+
+In C this would compile and read freed memory. In Rust, it's a compile error.
+
+## Putting it all together
+
+```
+ ┌───────────────────────────────────────────────────────────────────────┐
+ │  STACK  : fixed-size data, cleaned up automatically on scope exit     │
+ │  HEAP   : dynamic data, must be explicitly FREED exactly once         │
+ │                                                                       │
+ │  SCOPE  : the { ... } region where a name is valid; known at compile  │
+ │           time, so the compiler knows where cleanup should happen     │
+ │  OWNER  : the one variable holding the "free this" duty               │
+ │  DROP   : the cleanup the compiler inserts at the owner's scope end   │
+ │                                                                       │
+ │  One owner      → freed exactly once   (no double free)               │
+ │  Drop at scope  → always freed          (no leaks, in normal code)    │
+ │  Move / borrow  → old names & borrows can't outlive the value         │
+ │                                         (no use-after-free)           │
+ │                                                                       │
+ │  All checked at COMPILE time → zero runtime cost, no GC               │
+ └───────────────────────────────────────────────────────────────────────┘
+```
+
+From your C# and Python background, the biggest mental shift is that assignment no longer means "another name for the same object." It means "hand the cleanup duty to someone else," unless the type is `Copy` or you borrow with `&`.
+
+A natural next step would be going deeper into the borrowing rules (`&` vs `&mut`, and why the "one writer or many readers" rule also prevents data races), or into lifetimes, which are how the compiler tracks that a borrow doesn't outlive its owner.

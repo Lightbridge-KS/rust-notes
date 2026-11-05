@@ -1,0 +1,135 @@
+---
+title: "Common Cargo Commands"
+---
+
+Cargo is Rust's build tool **and** package manager in one. If you know the .NET CLI, it maps closely: `cargo` is to Rust what `dotnet` is to C#.
+
+## Project anatomy
+
+```
+cargo new hello_rust
+        │
+        ▼
+hello_rust/
+├── Cargo.toml        ← manifest (like .csproj / pubspec.yaml / pyproject.toml)
+├── Cargo.lock        ← exact resolved versions (auto-generated)
+├── .gitignore        ← git repo initialized for you
+├── src/
+│   └── main.rs       ← entry point (binary crate)
+│                       (lib.rs for a library crate)
+└── target/           ← build output (git-ignored)
+    ├── debug/        ← `cargo build`
+    └── release/      ← `cargo build --release`
+```
+
+## 1. Creating projects
+
+```bash
+cargo new my_app            # new binary (executable) project
+cargo new my_lib --lib      # new library project (src/lib.rs)
+cargo init                  # turn the current folder into a Cargo project
+```
+
+## 2. Building & running
+
+```bash
+cargo check                 # type-check only, no binary → FASTEST feedback loop
+cargo build                 # debug build    → target/debug/my_app
+cargo build --release       # optimized build → target/release/my_app
+cargo run                   # build + run
+cargo run --release         # build optimized + run
+cargo run -- --input a.txt  # args after `--` go to YOUR program, not Cargo
+cargo clean                 # delete target/ folder
+```
+
+> 💡 `cargo check` is what you'll run most. It skips code generation, so it's much faster than `build`. Debug builds can be 10–100× slower at runtime than release builds, so always benchmark with `--release`.
+
+## 3. Dependencies (crates from crates.io)
+
+```bash
+cargo add serde                       # add latest version to Cargo.toml
+cargo add serde --features derive     # with a feature flag
+cargo add tokio@1.40                  # specific version
+cargo add --dev pretty_assertions     # dev-only dependency (tests)
+cargo remove serde                    # remove a dependency
+cargo update                          # update Cargo.lock within semver ranges
+cargo tree                            # show the dependency tree
+```
+
+Which writes into `Cargo.toml`:
+
+```toml
+[package]
+name = "my_app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+```
+
+## 4. Testing & benchmarking
+
+```bash
+cargo test                       # run all tests (unit + integration + doc tests)
+cargo test parse                 # run only tests whose name contains "parse"
+cargo test -- --nocapture        # show println! output from tests
+cargo test --release             # test with optimizations
+cargo bench                      # run benchmarks
+```
+
+## 5. Code quality (your "clean code" toolkit)
+
+```bash
+cargo fmt                   # auto-format code (like black / dart format)
+cargo fmt --check           # verify formatting only (good for CI)
+cargo clippy                # linter with ~700 lints and helpful suggestions
+cargo clippy -- -D warnings # treat warnings as errors (CI)
+cargo doc --open            # generate HTML docs from /// comments and open in browser
+```
+
+> 💡 Clippy is like having a Rust mentor review your code. It often teaches you idiomatic Rust ("this loop could be an iterator", "this clone is unnecessary").
+
+## 6. Installing tools & publishing
+
+```bash
+cargo install ripgrep        # install a Rust CLI tool globally (~/.cargo/bin)
+cargo install --list         # list installed tools
+cargo publish                # publish your crate to crates.io
+```
+
+## Typical daily workflow
+
+```
+ ┌──────────┐    ┌─────────────┐    ┌──────────────┐    ┌────────────┐    ┌────────────────────┐
+ │ edit .rs │───▶│ cargo check │───▶│ cargo clippy │───▶│ cargo test │───▶│ cargo build        │
+ └──────────┘    └─────────────┘    └──────────────┘    └────────────┘    │   --release        │
+      ▲               │ errors?                                           └────────────────────┘
+      └───────────────┘   (Rust compiler errors are very descriptive — read them!)
+```
+
+## Rosetta stone with tools you already know
+
+| Task | Rust (Cargo) | C# (.NET) | Dart | Python (uv) |
+|---|---|---|---|---|
+| New project | `cargo new` | `dotnet new console` | `dart create` | `uv init` |
+| Add package | `cargo add` | `dotnet add package` | `dart pub add` | `uv add` |
+| Build | `cargo build` | `dotnet build` | `dart compile exe` | n/a |
+| Run | `cargo run` | `dotnet run` | `dart run` | `uv run` |
+| Test | `cargo test` | `dotnet test` | `dart test` | `uv run pytest` |
+| Format | `cargo fmt` | `dotnet format` | `dart format` | `ruff format` |
+| Lint | `cargo clippy` | Roslyn analyzers | `dart analyze` | `ruff check` |
+| Manifest | `Cargo.toml` | `.csproj` | `pubspec.yaml` | `pyproject.toml` |
+| Lockfile | `Cargo.lock` | `packages.lock.json` | `pubspec.lock` | `uv.lock` |
+
+## Bonus: workspace flag
+
+When you have a multi-crate **workspace** (like a .NET solution with several projects), target a specific member with `-p`:
+
+```bash
+cargo build -p core_lib
+cargo test  -p api_server
+```

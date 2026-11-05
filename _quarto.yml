@@ -9,6 +9,14 @@ book:
   site-url: https://rust-notes-lightbridge.netlify.app
   chapters:
     - index.qmd
+    - part: Concept
+      chapters: 
+       - text: Ownership
+         href: "contents/concept/rust-ownership.qmd"
+    - part: Tooling
+      chapters: 
+        - text: Cargo Commands
+          href: "contents/tooling/cargo-commands.qmd"
 
 format:
   html:
