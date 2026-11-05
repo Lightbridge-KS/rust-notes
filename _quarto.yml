@@ -17,6 +17,8 @@ book:
       chapters: 
        - text: Ownership
          href: "contents/concept/rust-ownership.qmd"
+       - text: Onewriter XOR Manyreader
+         href: "contents/concept/onewriter-xor-manyreader.qmd"
     - part: Tooling
       chapters: 
         - text: Cargo Commands

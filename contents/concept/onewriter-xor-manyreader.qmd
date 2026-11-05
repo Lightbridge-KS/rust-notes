@@ -1,0 +1,244 @@
+---
+title: "One writer (`&mut T`) xor Many Reader (`&T`)"
+---
+
+Borrowing is where Rust's design really clicks, because the "one writer or many readers" rule turns out to be a single idea that prevents several different classes of bugs at once. Let's build it up.
+
+---
+
+## 1. Recap: what a borrow is
+
+From last time: an owner holds the "free this" duty. A borrow (a reference) is a pointer that lets you use the value without taking that duty. Rust has exactly two kinds:
+
+```
+ ┌──────────────┬────────────────────────┬──────────────┬────────────────────┐
+ │ Syntax       │ Common name            │ Can mutate?  │ How many at once?  │
+ ├──────────────┼────────────────────────┼──────────────┼────────────────────┤
+ │ &T           │ shared reference       │ No           │ As many as you like│
+ │ &mut T       │ mutable reference      │ Yes          │ Exactly ONE, and   │
+ │              │                        │              │ no &T alongside it │
+ └──────────────┴────────────────────────┴──────────────┴────────────────────┘
+```
+
+The names `&` and `&mut` are slightly misleading. The more accurate mental names are shared vs exclusive (or unique). The real meaning of `&mut` is "nobody else can touch this right now"; mutation is just the thing exclusivity makes safe.
+
+The rule in one line:
+
+```
+        ALIASING  XOR  MUTATION
+   (many can see it)   (it can change)
+          you may have one or the other, never both at the same time
+```
+
+## 2. What the owner itself may do while a borrow exists
+
+Borrowing also restricts the owner, which surprises people at first:
+
+```
+ ┌───────────────────────────┬──────────────┬───────────────┬──────────────┐
+ │ While the value has...    │ Owner reads? │ Owner writes? │ Owner moves? │
+ ├───────────────────────────┼──────────────┼───────────────┼──────────────┤
+ │ no borrows                │ ✓            │ ✓ (if mut)    │ ✓            │
+ │ one or more &T borrows    │ ✓            │ ✗             │ ✗            │
+ │ one &mut T borrow         │ ✗            │ ✗             │ ✗            │
+ └───────────────────────────┴──────────────┴───────────────┴──────────────┘
+```
+
+```rust
+let mut s = String::from("hi");
+let m = &mut s;          // exclusive access handed to m
+println!("{s}");         // error[E0502]: cannot borrow `s` as immutable
+                         //               because it is also borrowed as mutable
+m.push('!');
+```
+
+Even the owner can't peek while someone else holds the exclusive borrow. That's what "exclusive" means.
+
+## 3. Why the rule exists, part 1: single-threaded invalidation
+
+You might think "if there's only one thread, how could reading while writing ever go wrong?" Here's the canonical example:
+
+```rust
+let mut v = vec![1, 2, 3];
+let first = &v[0];       // shared borrow pointing INTO v's heap buffer
+v.push(4);               // error[E0502]: cannot borrow `v` as mutable
+                         //               because it is also borrowed as immutable
+println!("{first}");
+```
+
+It looks harmless, but `push` may need more capacity. When it does, `Vec` allocates a bigger buffer, copies the elements over, and frees the old one. Step through what would happen if Rust allowed it:
+
+The general pattern is: a reader holds a pointer that assumes the structure stays put, and a writer changes the structure underneath it. The languages you know hit the same problem, but detect it at runtime, if at all:
+
+```
+ C#     : foreach (var x in list) list.Add(x);
+          → InvalidOperationException: "Collection was modified"   (runtime)
+ Python : for k in d: d[k + "x"] = 1
+          → RuntimeError: dictionary changed size during iteration  (runtime)
+ C++    : for (auto& x : vec) vec.push_back(x);
+          → undefined behavior, maybe works, maybe crashes          (silent)
+ Rust   : for x in &v { v.push(*x); }
+          → error[E0502]                                            (compile time)
+```
+
+C# and Python bolt on runtime "version counters" for specific collections. Rust gets the same protection for every type, including your own, from one general rule and with zero runtime cost.
+
+There's a second, subtler benefit. Because `&mut` guarantees no aliasing, the compiler (and you) can reason about code locally:
+
+```rust
+fn add_twice(a: &mut i32, b: &i32) {
+    *a += *b;
+    *a += *b;
+}
+```
+
+If `a` and `b` could point to the same integer (starting at 1), the result would be 4 instead of the "obvious" 3, because the first line changes what `b` reads. In C this aliasing is legal, so the compiler must reload `*b` every time. In Rust, `add_twice(&mut x, &x)` is a compile error, so the function means exactly what it looks like, and the optimizer can load `*b` once.
+
+## 4. Why the rule exists, part 2: data races
+
+A data race has a precise definition. It occurs when all three of these hold:
+
+```
+ ┌────────────────────────────────────────────────────────────────┐
+ │ 1. Two or more threads access the same memory concurrently     │
+ │ 2. At least one of them WRITES                                 │
+ │ 3. There is no synchronization between them                    │
+ └────────────────────────────────────────────────────────────────┘
+```
+
+Points 1 and 2 together are exactly "aliasing plus mutation." So the borrowing rule that protects the `Vec` above is the same rule that rules out data races. Here's why races are so nasty: `counter += 1` is not one operation, it's read, add, write.
+
+```
+   counter = 0
+
+   Thread A                 Thread B
+   ────────                 ────────
+   read  counter → 0
+                            read  counter → 0
+   add   0 + 1 = 1
+                            add   0 + 1 = 1
+   write counter ← 1
+                            write counter ← 1
+
+   Final: 1   (expected 2)  ← a "lost update", and it only happens sometimes
+```
+
+Rust refuses to compile the racy version, because both threads would need a `&mut` to the same value:
+
+```rust
+use std::thread;
+
+fn main() {
+    let mut counter = 0;
+    thread::scope(|s| {
+        s.spawn(|| counter += 1);   // closure captures &mut counter
+        s.spawn(|| counter += 1);   // error[E0499]: cannot borrow `counter`
+    });                             //   as mutable more than once at a time
+}
+```
+
+Meanwhile, many readers across threads are perfectly fine, because many `&T` is allowed:
+
+```rust
+let data = vec![1, 2, 3];
+thread::scope(|s| {
+    s.spawn(|| println!("{:?}", data));      // &data
+    s.spawn(|| println!("{}", data.len()));  // &data
+});                                          // ✓ compiles
+```
+
+Notice there's no special "threading rule" here. The compiler applied the ordinary borrow rule, and the data race simply couldn't be expressed. (Under the hood, two marker traits, `Send` and `Sync`, decide which types may cross or be shared between threads; most everyday types get them automatically.)
+
+## 5. "But I need shared mutable state!": interior mutability
+
+Real programs sometimes genuinely need several threads updating one counter. Rust's answer is not to break the rule but to enforce it at runtime instead of compile time, using a type that manages exclusivity itself:
+
+```rust
+use std::sync::Mutex;
+use std::thread;
+
+fn main() {
+    let counter = Mutex::new(0);
+    thread::scope(|s| {
+        for _ in 0..2 {
+            s.spawn(|| {
+                let mut guard = counter.lock().unwrap(); // wait for exclusivity
+                *guard += 1;                             // guard acts like &mut i32
+            });                                          // guard dropped → unlock (RAII!)
+        }
+    });
+    println!("{}", counter.into_inner().unwrap()); // always 2
+}
+```
+
+```
+   Both threads hold   &Mutex<i32>        (shared: allowed)
+                            │
+                  lock() ───┤  only one thread at a time gets through
+                            ▼
+                   MutexGuard  ≈  &mut i32   (exclusive: still one writer)
+```
+
+The "one writer" guarantee still holds; the `Mutex` just checks it while running. And notice how unlocking is handled by `Drop` from last lesson: you can't forget to release the lock. The same family includes `RefCell` (single-threaded, panics if you break the rule at runtime) and atomics like `AtomicUsize` for simple counters. You'll often see `Arc<Mutex<T>>` when the data must outlive a single scope: `Arc` provides shared ownership across threads, `Mutex` provides exclusive access.
+
+## 6. How long does a borrow last?
+
+A borrow lasts from where it's created until its last use, not until the end of the scope. This is called non-lexical lifetimes, and it makes the rules much less annoying in practice:
+
+```rust
+let mut v = vec![1, 2, 3];
+let first = &v[0];        // ─┐ shared borrow begins
+println!("{first}");      // ─┘ last use: borrow ends here
+v.push(4);                // ✓ no active borrow, mutation allowed
+```
+
+```
+   line:        1      2       3       4
+   &v (first):         ├───────┤
+   &mut v (push):                      ├┤      no overlap → OK
+```
+
+The borrow checker is essentially drawing these intervals and making sure a `&mut` interval never overlaps with any other borrow of the same value.
+
+## 7. How this shapes API design
+
+Since you care about architecture: these rules make every function signature a precise contract about what it does with your data, which C# and Python signatures can't express.
+
+```rust
+impl Account {
+    fn balance(&self) -> i64           // "I only read"        (many callers ok)
+    fn deposit(&mut self, amt: i64)    // "I modify, exclusively"
+    fn close(self) -> Receipt          // "I consume it; you can't use it after"
+}
+```
+
+```
+   &self       →  like a read-only view; safe to call from many places at once
+   &mut self   →  caller must prove nobody else is looking
+   self        →  ownership transfer; the old variable is gone (e.g. a builder's
+                  .build(), a file's .close(), a state machine's transition)
+```
+
+The `self` form is especially powerful for state machines: after `connection.close()`, any later use of `connection` is a compile error, not a runtime "ObjectDisposedException."
+
+## Summary
+
+```
+ ┌──────────────────────────────────────────────────────────────────────┐
+ │  &T      shared     many at once     read-only                       │
+ │  &mut T  exclusive  exactly one      read + write, no one else looks │
+ │                                                                      │
+ │  Core rule:  ALIASING  XOR  MUTATION                                 │
+ │                                                                      │
+ │  Prevents, with ONE rule, all at compile time:                       │
+ │    • iterator / reference invalidation  (single-threaded)            │
+ │    • surprising aliasing bugs           (single-threaded)            │
+ │    • data races                         (multi-threaded)             │
+ │                                                                      │
+ │  Need shared mutation?  Mutex / RefCell / atomics enforce the same   │
+ │  "one writer" rule at runtime instead.                               │
+ │                                                                      │
+ │  Borrows last until their LAST USE, not the end of the scope.        │
+ └──────────────────────────────────────────────────────────────────────┘
+```
+
