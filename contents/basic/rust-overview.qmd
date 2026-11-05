@@ -1,0 +1,319 @@
+---
+title: "A Tour of Rust 🦀"
+---
+
+Rust is a systems programming language built around one promise: **memory safety and thread safety without a garbage collector**. It gives you performance close to C/C++ while the compiler catches whole classes of bugs (null dereference, use-after-free, data races) before your program ever runs.
+
+## 1. Where Rust sits
+
+Every language has to decide who frees memory. The three main approaches:
+
+```
+ HOW MEMORY GETS FREED
+ ─────────────────────────────────────────────────────────────────
+ Manual (C, C++)        Garbage Collector          Ownership (Rust)
+ ───────────────        ─────────────────          ────────────────
+ You call free()        Runtime scans & frees      Compiler inserts the
+                        (Python, C#, Dart, JS, R)  "free" at compile time
+ + Fast                 + Easy                     + Fast
+ - Easy to crash        - GC pauses, overhead      + Safe
+ - Security bugs        - Less control             - Steeper learning curve
+```
+
+Rust gets both speed and safety by enforcing **ownership rules at compile time**. The cost is a compiler that is strict at first. Think of it as a demanding code reviewer that refuses to merge buggy code.
+
+## 2. The toolchain
+
+On your Mac (zsh):
+
+```bash
+# Install rustup (the version manager, like pyenv/fvm)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+rustc --version          # the compiler
+cargo --version          # build tool + package manager
+
+cargo new hello_rust     # create a project
+cd hello_rust
+cargo run                # build + run
+```
+
+```
+ hello_rust/
+ ├── Cargo.toml      ← like pubspec.yaml / .csproj / DESCRIPTION
+ ├── Cargo.lock      ← exact resolved versions
+ └── src/
+     └── main.rs     ← entry point
+```
+
+Cargo commands you'll use daily:
+
+| Command | Purpose | Analogy |
+|---|---|---|
+| `cargo build` / `cargo run` | compile / compile + run | `dotnet build` / `dotnet run` |
+| `cargo test` | run tests | `pytest`, `flutter test` |
+| `cargo add serde` | add a dependency (a "crate") | `flutter pub add`, `pip install` |
+| `cargo fmt` | auto-format | `dart format`, black |
+| `cargo clippy` | linter with very good advice | `dart analyze` |
+| `cargo doc --open` | generate HTML docs | roxygen2 / pkgdown |
+
+For VS Code, install the **rust-analyzer** extension. It shows inferred types inline, which helps a lot while learning.
+
+## 3. Basic syntax
+
+```rust
+fn main() {
+    let x = 5;               // immutable by default
+    let mut count = 0;       // `mut` to allow change
+    count += x;
+
+    let name: &str = "Rust"; // optional type annotation
+    let pi = 3.14_f64;
+
+    println!("{name} count = {count}, pi = {pi}");
+
+    let result = add(2, 3);
+    println!("2 + 3 = {result}");
+}
+
+fn add(a: i32, b: i32) -> i32 {
+    a + b          // no semicolon = this expression is the return value
+}
+```
+
+Three things to notice early:
+
+1. **Immutable by default.** This is the opposite of Python, C#, and JS. You opt into mutation with `mut`.
+2. **Almost everything is an expression.** `if`, `match`, and blocks return values: `let grade = if score > 50 { "pass" } else { "fail" };`
+3. **Macros end with `!`.** `println!`, `vec!`, and `format!` are macros, not functions.
+
+## 4. Ownership: the core idea
+
+This is the concept that makes Rust *Rust*. There are three rules:
+
+```
+ ┌───────────────────────────────────────────────────────────┐
+ │ 1. Each value has exactly ONE owner (a variable).         │
+ │ 2. When the owner goes out of scope, the value is dropped │
+ │    (memory freed) automatically.                          │
+ │ 3. Ownership can be MOVED, or temporarily BORROWED.       │
+ └───────────────────────────────────────────────────────────┘
+```
+
+### Move
+
+```rust
+let s1 = String::from("hello");
+let s2 = s1;              // ownership MOVES from s1 to s2
+// println!("{s1}");      // ❌ compile error: value moved
+println!("{s2}");         // ✅
+```
+
+Here is what happens in memory:
+
+```
+   STACK                         HEAP
+ ┌──────────────┐
+ │ s1 (invalid) │ ─ ─ ─ ✗
+ ├──────────────┤             ┌───┬───┬───┬───┬───┐
+ │ s2  ptr ─────┼────────────►│ h │ e │ l │ l │ o │
+ │     len = 5  │             └───┴───┴───┴───┴───┘
+ │     cap = 5  │
+ └──────────────┘
+ Only ONE owner → only ONE free → no "double free" bug
+```
+
+In C# or Python, `s2 = s1` would create two references to the same object, and the GC would track both. Rust instead invalidates `s1`, so there is never any question about who frees the memory.
+
+### Borrowing (references)
+
+Most of the time you don't want to give a value away. You **lend** it instead:
+
+```rust
+fn length(s: &str) -> usize {     // borrows, doesn't own
+    s.len()
+}
+
+fn shout(s: &mut String) {         // borrows mutably
+    s.push_str("!!!");
+}
+
+fn main() {
+    let mut msg = String::from("hi");
+    let n = length(&msg);          // lend read-only
+    shout(&mut msg);               // lend with write access
+    println!("{msg} ({n})");       // msg still owned here ✅
+}
+```
+
+The **borrowing rule** is the heart of Rust's safety:
+
+```
+ At any moment, for a given value you may have EITHER:
+
+   many readers   &T  &T  &T      ✅
+        OR
+   one writer     &mut T          ✅
+
+   but NEVER both at once         ❌  (this is what prevents data races)
+```
+
+The compiler component that checks this is called the **borrow checker**. You will argue with it a lot in your first weeks. That is normal, and it gets much easier.
+
+## 5. Structs, enums, and pattern matching
+
+Rust has **no classes and no inheritance**. You model data with `struct` and `enum`, and attach behavior with `impl`.
+
+```rust
+struct Point {
+    x: f64,
+    y: f64,
+}
+
+impl Point {
+    fn new(x: f64, y: f64) -> Self {      // "constructor" by convention
+        Self { x, y }
+    }
+    fn distance(&self, other: &Point) -> f64 {   // &self = borrowed receiver
+        ((self.x - other.x).powi(2) + (self.y - other.y).powi(2)).sqrt()
+    }
+}
+```
+
+Rust enums are much more powerful than C# enums. Each variant can carry data, which makes them **algebraic data types**, similar to Dart 3's sealed classes:
+
+```rust
+enum Shape {
+    Circle { radius: f64 },
+    Rect { w: f64, h: f64 },
+    Triangle(f64, f64, f64),
+}
+
+fn area(shape: &Shape) -> f64 {
+    match shape {
+        Shape::Circle { radius } => std::f64::consts::PI * radius * radius,
+        Shape::Rect { w, h } => w * h,
+        Shape::Triangle(a, b, c) => {
+            let s = (a + b + c) / 2.0;
+            (s * (s - a) * (s - b) * (s - c)).sqrt()
+        }
+    }   // `match` must be exhaustive: forget a variant → compile error
+}
+```
+
+## 6. No null, no exceptions
+
+Two standard enums replace `null` and exceptions:
+
+```rust
+enum Option<T> { Some(T), None }       // "maybe a value"
+enum Result<T, E> { Ok(T), Err(E) }    // "success or error"
+```
+
+### Option
+
+```rust
+fn find_user(id: u32) -> Option<String> {
+    if id == 1 { Some("Alice".to_string()) } else { None }
+}
+
+match find_user(1) {
+    Some(name) => println!("Found {name}"),
+    None => println!("Not found"),
+}
+```
+
+### Result and the `?` operator
+
+```rust
+use std::fs;
+use std::io;
+
+fn read_config(path: &str) -> Result<String, io::Error> {
+    let text = fs::read_to_string(path)?;   // `?` = if Err, return it early
+    Ok(text.trim().to_string())
+}
+```
+
+```
+ Dart / C#:   String? name         try { ... } catch (e) { ... }
+ Rust:        Option<String>       Result<T, E>  +  `?`
+
+ Errors are VALUES in the type signature, so you cannot forget to handle them.
+```
+
+## 7. Traits and generics
+
+A **trait** is like a C# `interface` or a Dart abstract class. Since you value SOLID, you'll like this part: Rust pushes you toward composition and interface segregation by design.
+
+```rust
+trait Describe {
+    fn describe(&self) -> String;
+
+    fn shout(&self) -> String {          // default method
+        self.describe().to_uppercase()
+    }
+}
+
+impl Describe for Point {
+    fn describe(&self) -> String {
+        format!("Point({}, {})", self.x, self.y)
+    }
+}
+
+// Static dispatch (generics): monomorphized, zero runtime cost
+fn print_it(item: &impl Describe) {
+    println!("{}", item.describe());
+}
+
+// Dynamic dispatch (trait objects): like C# interface references
+fn print_all(items: &[Box<dyn Describe>]) {
+    for i in items { println!("{}", i.describe()); }
+}
+```
+
+```
+        trait Describe            ← abstraction (DIP: depend on this)
+          ▲        ▲
+   impl   │        │   impl
+   ┌──────┴──┐  ┌──┴──────┐
+   │  Point  │  │  User   │       ← no inheritance tree,
+   └─────────┘  └─────────┘         just "implements" relations
+```
+
+You can also implement your own traits for types you didn't write, even built-in ones like `String`. This works much like Dart extension methods.
+
+## 8. Mental map from languages you know
+
+| Concept | C# / Dart / Python | Rust |
+|---|---|---|
+| Package manager | NuGet / pub / pip | Cargo (crates.io) |
+| Class | `class` | `struct` + `impl` |
+| Interface | `interface` / abstract class | `trait` |
+| Null | `null`, `None` | `Option<T>` |
+| Exceptions | `try/catch` | `Result<T, E>` + `?` |
+| Memory | Garbage collector | Ownership + borrowing |
+| Lists | `List<T>` / `list` | `Vec<T>` |
+| Dictionary | `Dictionary` / `dict` | `HashMap<K, V>` |
+| Lambdas | `x => x * 2` | `\|x\| x * 2` |
+| LINQ / comprehensions | `.Where().Select()` | `.iter().filter().map()` |
+| async | `async/await` | `async/await` + a runtime (e.g. Tokio) |
+
+## 9. A suggested learning path
+
+```
+ Week 1-2   Syntax, ownership, borrowing, structs, enums, match
+              └─ "The Rust Programming Language" book, ch. 1–6
+ Week 3     Option/Result, error handling, collections, modules
+ Week 4     Traits, generics, iterators & closures
+ Week 5+    Lifetimes ('a), smart pointers (Box, Rc, Arc),
+            concurrency, then async (Tokio) or a CLI project
+```
+
+Good free resources:
+
+- **The Rust Book**: doc.rust-lang.org/book. This is the canonical starting point.
+- **Rustlings**: small exercises you fix until they compile, and great for building muscle memory.
+- **Rust by Example**: learn by reading runnable snippets.
+
+A tip for learning: read compiler errors carefully. Rust's error messages are famously helpful and often tell you the exact fix.

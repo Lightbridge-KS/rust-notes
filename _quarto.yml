@@ -9,6 +9,10 @@ book:
   site-url: https://rust-notes-lightbridge.netlify.app
   chapters:
     - index.qmd
+    - part: Overview
+      chapters: 
+        - text: Rust Tour
+          href: "contents/basic/rust-overview.qmd"
     - part: Concept
       chapters: 
        - text: Ownership
