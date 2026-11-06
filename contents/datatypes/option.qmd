@@ -1,0 +1,252 @@
+---
+title: "`Option<T>`: Rust's Answer to 'Maybe There's a Value'"
+---
+
+
+## 1. The problem `Option` solves
+
+Most languages you know have `null`, or `None` in Python. A variable of type `String` might actually hold a string, or it might hold nothing, and the compiler often can't tell which. Tony Hoare, who invented null references, later called them his "billion-dollar mistake" because of how many crashes they've caused.
+
+**Rust has no `null`.** It represents "a value that might be missing" as an ordinary type in the standard library:
+
+```rust
+enum Option<T> {
+    None,      // no value
+    Some(T),   // a value of type T, wrapped inside
+}
+```
+
+That's the whole definition. `Option<T>` is a generic **enum** (a sum type, or tagged union) with exactly two variants. It's in the **prelude**, so you can write `Some(5)` and `None` directly without the `Option::` prefix.
+
+```
+                 Option<i32>
+        ┌─────────────┴─────────────┐
+        │                           │
+     ┌──────┐                ┌─────────────┐
+     │ None │                │  Some(i32)  │
+     └──────┘                │   ┌─────┐   │
+   "nothing here"            │   │  42 │   │  ← the real value
+                             │   └─────┘   │    lives INSIDE the box
+                             └─────────────┘
+```
+
+**The key idea:** `Option<i32>` and `i32` are **different types**. You can't do arithmetic on an `Option<i32>`. You have to open the box first, and the compiler makes you handle the empty case when you do.
+
+```rust
+let a: i32 = 5;
+let b: Option<i32> = Some(10);
+
+let sum = a + b;   // ❌ compile error: cannot add `Option<i32>` to `i32`
+```
+
+## 2. Comparison with languages you know
+
+| Language | "Maybe missing" | Enforced by compiler? |
+|---|---|---|
+| Python | `Optional[int]` / `int \| None` | ❌ Type hints only; crashes at runtime |
+| JavaScript | `null` / `undefined` | ❌ No |
+| C# | `int?` (`Nullable<T>`), `string?` | ⚠️ Partly; nullable reference types give **warnings** |
+| Dart 3 | `int?` | ✅ Yes (sound null safety) |
+| **Rust** | `Option<i32>` | ✅ Yes, and it's an ordinary enum rather than special syntax |
+
+Dart is the closest mental model. If you've used Dart 3 **sealed classes** with `switch` pattern matching, `Option` is the same idea: a sealed type with two cases, and the compiler checks that you've handled both.
+
+## 3. Creating Options
+
+```rust
+let some_number: Option<i32> = Some(42);
+let some_name = Some("Lightbridge");      // type inferred: Option<&str>
+let nothing: Option<i32> = None;          // annotation needed: None of WHAT?
+```
+
+A typical function that might not find something:
+
+```rust
+fn find_first_even(nums: &[i32]) -> Option<i32> {
+    for &n in nums {
+        if n % 2 == 0 {
+            return Some(n);   // found it: wrap it
+        }
+    }
+    None                      // not found
+}
+```
+
+The return type alone tells the caller that this might not return a value. In Python, you'd only learn that by reading the docs, or by hitting a crash.
+
+The standard library uses `Option` everywhere:
+
+```rust
+let v = vec![10, 20, 30];
+v.get(1);        // Some(&20)
+v.get(99);       // None     (v[99] would panic instead)
+
+let mut map = std::collections::HashMap::new();
+map.insert("CT", 120);
+map.get("MRI");  // None
+```
+
+## 4. Getting the value out (the important part)
+
+There are several ways to open the box, from safest to most dangerous.
+
+### 4.1 `match`: exhaustive and explicit
+
+```rust
+match find_first_even(&[1, 3, 4, 7]) {
+    Some(n) => println!("Found {n}"),
+    None    => println!("No even number"),
+}
+```
+
+If you forget the `None` arm, the code **won't compile**. This is where the safety guarantee comes from.
+
+### 4.2 `if let`: when you only care about `Some`
+
+```rust
+if let Some(n) = find_first_even(&nums) {
+    println!("Found {n}");
+}   // None case is silently ignored
+```
+
+### 4.3 `let ... else`: early exit (guard clause style)
+
+```rust
+fn process(nums: &[i32]) {
+    let Some(n) = find_first_even(nums) else {
+        println!("nothing to do");
+        return;            // the else block MUST exit (return/break/panic)
+    };
+    // From here on, `n` is a plain i32, no Option anymore
+    println!("Processing {n}");
+}
+```
+
+This keeps the "happy path" un-nested, which fits a clean-code style well.
+
+### 4.4 The `?` operator: propagate `None` upward
+
+Inside a function that **itself returns `Option`**, `?` means "if this is `None`, return `None` from my function right now; otherwise unwrap it."
+
+```rust
+fn first_even_doubled(nums: &[i32]) -> Option<i32> {
+    let n = find_first_even(nums)?;   // None → early return None
+    Some(n * 2)
+}
+```
+
+```
+find_first_even(nums)?
+        │
+        ├── Some(4) ──► n = 4, continue
+        │
+        └── None ─────► return None immediately
+```
+
+### 4.5 Fallback defaults: never panic
+
+```rust
+let x = maybe.unwrap_or(0);                 // use 0 if None
+let x = maybe.unwrap_or_default();          // use T::default() (0, "", false...)
+let x = maybe.unwrap_or_else(|| expensive_compute());  // lazy fallback
+```
+
+### 4.6 `unwrap()` / `expect()`: "I promise it's Some"
+
+```rust
+let n = maybe.unwrap();                         // panics if None
+let n = maybe.expect("config must have port");  // panics with your message
+```
+
+These crash the program on `None`. They're fine in prototypes, tests, and cases where `None` really is a bug. In production code, prefer `expect` with a meaningful message over a bare `unwrap`.
+
+## 5. Transforming without unwrapping (combinators)
+
+Often you don't need to open the box. You can work on the value **inside** it, and `None` just passes through untouched.
+
+```
+          .map(|n| n * 2)
+Some(4) ─────────────────► Some(8)
+None    ─────────────────► None      (closure never runs)
+```
+
+| Method | Closure returns | Use when |
+|---|---|---|
+| `map(f)` | `U` | Transform the inner value |
+| `and_then(f)` | `Option<U>` | The next step might also fail (flatMap) |
+| `filter(pred)` | `bool` | Turn `Some` into `None` if a condition fails |
+| `ok_or(err)` | (no closure) | Convert to `Result<T, E>` for error handling |
+| `or(other)` | (no closure) | Fallback to another `Option` |
+
+A realistic pipeline that parses a port from optional config:
+
+```rust
+let raw: Option<&str> = Some("8080");
+
+let port: u16 = raw
+    .and_then(|s| s.parse::<u16>().ok())   // "8080" → Some(8080); "abc" → None
+    .filter(|&p| p > 1024)                 // reject privileged ports
+    .unwrap_or(3000);                      // fallback default
+```
+
+This is the same idea as chaining `?.` in Dart/C#, but more expressive. If you've used `purrr` in R, `map` and `and_then` will feel familiar.
+
+## 6. Ownership gotchas with Option
+
+Since `Option<T>` *owns* its `T`, Rust's borrowing rules apply.
+
+```rust
+let name: Option<String> = Some(String::from("KS"));
+
+// ❌ This MOVES the String out of `name`; `name` is unusable afterward
+// let len = name.map(|s| s.len());
+
+// ✅ Borrow instead: Option<String> → Option<&String>
+let len = name.as_ref().map(|s| s.len());
+println!("{name:?} has length {len:?}");    // name still usable
+```
+
+Other useful ones:
+
+```rust
+v.get(0).copied()      // Option<&i32> → Option<i32>  (for Copy types)
+v.get(0).cloned()      // Option<&String> → Option<String>
+slot.take()            // moves value out, leaves None behind (great in structs)
+```
+
+## 7. Engineering tidbit: it's free
+
+You might expect the "box" to cost memory. Rust uses a **niche optimization** for types that can never be zero or null, like references and `Box`:
+
+```rust
+use std::mem::size_of;
+
+size_of::<&i32>()               // 8 bytes
+size_of::<Option<&i32>>()       // 8 bytes  ← same! None is stored as a null pointer
+size_of::<Box<i32>>()           // 8 bytes
+size_of::<Option<Box<i32>>>()   // 8 bytes
+```
+
+At the machine level, `Option<&T>` is exactly a nullable pointer. You get null's performance with none of its danger.
+
+## 8. Decision guide
+
+```
+I have an Option<T>. What do I do?
+│
+├─ Need to handle both cases differently? ──────► match
+├─ Only care about Some? ───────────────────────► if let
+├─ None means "bail out of this function"?
+│    ├─ my fn returns Option ───────────────────► ?
+│    └─ otherwise ──────────────────────────────► let ... else
+├─ Have a sensible default? ────────────────────► unwrap_or / unwrap_or_default
+├─ Want to transform, keep it wrapped? ─────────► map / and_then / filter
+├─ None should become an error? ────────────────► ok_or(...)?
+└─ None is truly impossible (a bug)? ───────────► expect("why")
+```
+
+## Try it yourself
+
+Write a function `fn middle_char(s: &str) -> Option<char>` that returns the middle character of a string, or `None` for an empty string. Then call it three ways: with `match`, with `unwrap_or('?')`, and with `.map(|c| c.to_ascii_uppercase())`. (Hint: `s.chars().nth(i)` already returns an `Option<char>`.)
+
+Paste your attempt and I'll review it. After that, the natural next topic is `Result<T, E>`, which is `Option`'s sibling for "this might fail, and here's why."
