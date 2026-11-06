@@ -15,6 +15,8 @@ book:
           href: "contents/basic/rust-overview.qmd"
     - part: Data Type
       chapters: 
+        - text: Rust Types
+          href: "contents/datatypes/overview-datatypes.qmd"
         - text: Structs
           href: "contents/datatypes/structs.qmd"
     - part: Concept

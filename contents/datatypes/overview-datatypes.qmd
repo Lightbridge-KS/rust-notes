@@ -1,0 +1,327 @@
+---
+title: "Rust Types"
+---
+
+
+Rust's type system will feel partly like C# (static, value vs. reference semantics) and partly like Dart 3 (sealed classes and pattern matching), but it adds one new idea: **every value has exactly one owner, and the type tells you where the data lives**. Keep that in mind as we go.
+
+## 1. The big picture
+
+```
+                         Rust Types
+                             │
+      ┌──────────────────────┼──────────────────────────┐
+      │                      │                          │
+   Scalar               Compound                  Custom (yours)
+ (single value)    (fixed group, built-in)              │
+      │                      │                   ┌──────┴──────┐
+  i32, u8, f64,        tuple  (i32, f64)       struct         enum
+  bool, char           array  [i32; 5]       (AND: has      (OR: is one
+                                              all fields)    of variants)
+      │
+      └─────────── all live on the STACK (fixed size, known at compile time)
+
+                    Standard Library Collections (growable, HEAP)
+       String, Vec<T>, HashMap<K,V>, HashSet<T>, VecDeque<T>, BTreeMap<K,V> ...
+```
+
+## 2. Scalar types
+
+```rust
+let a: i32 = -42;        // signed integer (default for integers)
+let b: u8 = 255;         // unsigned, 0..=255
+let c: usize = 10;       // pointer-sized unsigned; used for indexing/lengths
+let d: f64 = 3.14;       // 64-bit float (default for floats)
+let e: bool = true;
+let f: char = '狗';      // 4 bytes, any Unicode scalar value (Thai works too: 'ก')
+```
+
+| Size | Signed | Unsigned |
+|---|---|---|
+| 8-bit | `i8` | `u8` |
+| 16-bit | `i16` | `u16` |
+| 32-bit | `i32` | `u32` |
+| 64-bit | `i64` | `u64` |
+| 128-bit | `i128` | `u128` |
+| pointer-sized | `isize` | `usize` |
+
+There are two things that will surprise you coming from Python and R.
+
+**No implicit conversion.** Even `i32 + i64` is a compile error, so you convert explicitly:
+
+```rust
+let x: i32 = 5;
+let y: i64 = 10;
+let z = x as i64 + y;          // `as` is a raw cast (can truncate!)
+let w: u8 = 300_i32.try_into().unwrap_or(255); // safe, checked conversion
+```
+
+**Overflow is a bug, not a silent wrap.** In debug builds, `255u8 + 1` panics. In release builds it wraps. If you want specific behavior, you say so:
+
+```rust
+let n: u8 = 250;
+n.checked_add(10);     // None        (returns Option<u8>)
+n.wrapping_add(10);    // 4           (modular arithmetic)
+n.saturating_add(10);  // 255         (clamps at max)
+```
+
+## 3. Compound types: tuple and array
+
+```rust
+// Tuple: fixed length, mixed types
+let point: (i32, f64, char) = (1, 2.5, 'x');
+let (a, b, c) = point;        // destructuring
+println!("{}", point.1);      // 2.5
+
+// Array: fixed length, single type, length is PART of the type
+let arr: [i32; 5] = [1, 2, 3, 4, 5];
+let zeros = [0u8; 100];       // 100 zeros
+println!("{}", arr[0]);       // bounds-checked at runtime → panics if out of range
+
+// Unit type: an empty tuple, like `void` in C#
+let nothing: () = ();
+```
+
+`[i32; 5]` and `[i32; 6]` are **different types**. If you need a growable list, use `Vec<T>` (section 6).
+
+## 4. Stack vs. heap
+
+Rust makes memory layout part of the type, so the following model is worth getting into your head early:
+
+```
+let n: i32 = 7;
+let v: Vec<i32> = vec![10, 20, 30];
+let s: String = String::from("hello");
+
+        STACK                              HEAP
+  ┌──────────────────┐
+n │ 7                │
+  ├──────────────────┤
+v │ ptr ─────────────┼──────────►  [10][20][30][  ]   (capacity 4)
+  │ len = 3          │
+  │ cap = 4          │
+  ├──────────────────┤
+s │ ptr ─────────────┼──────────►  [h][e][l][l][o]    (UTF-8 bytes)
+  │ len = 5          │
+  │ cap = 5          │
+  └──────────────────┘
+   fixed size,                      growable,
+   known at compile time            size known at runtime
+```
+
+`Vec<T>` and `String` are both small 24-byte "handles" on the stack that own a heap buffer. When the owner goes out of scope, the heap buffer is freed automatically. There's no garbage collector like in C#, Python, or R, and you never call `free` manually as in C.
+
+## 5. Strings: `String` vs `&str`
+
+This is the #1 confusion for newcomers.
+
+```
+String   = owned, growable, heap buffer      (like StringBuilder that you own)
+&str     = borrowed "view" into UTF-8 bytes  (ptr + len, read-only)
+
+let owned: String = String::from("hello world");
+let view: &str = &owned[0..5];       // "hello"
+let literal: &str = "baked into binary";
+
+  owned ──► [h][e][l][l][o][ ][w][o][r][l][d]
+             ▲
+  view  ─────┘  len = 5      (no copy, just a window)
+```
+
+```rust
+fn greet(name: &str) {            // accept &str: works with both kinds
+    println!("Hello, {name}");
+}
+
+let s = String::from("KS");
+greet(&s);          // &String auto-converts to &str
+greet("LB");        // literal is already &str
+```
+
+A good rule of thumb is to **take `&str` as a parameter and return `String`** when you're creating new text.
+
+There's also a quirk here: `s[0]` doesn't compile, because UTF-8 characters are 1–4 bytes, so "the 0th character" isn't an O(1) operation. Use `s.chars().nth(0)` or iterate with `.chars()` instead.
+
+## 6. Slices: the general pattern behind `&str`
+
+A slice `&[T]` is a borrowed view into contiguous data, whether that's an array, a `Vec`, or part of either:
+
+```rust
+let v = vec![1, 2, 3, 4, 5];
+let middle: &[i32] = &v[1..4];   // [2, 3, 4]
+
+fn sum(xs: &[i32]) -> i32 {      // accepts arrays AND Vecs
+    xs.iter().sum()
+}
+sum(&v);
+sum(&[10, 20]);
+```
+
+```
+  Owned          Borrowed view
+  ─────          ─────────────
+  String    →    &str
+  Vec<T>    →    &[T]
+  [T; N]    →    &[T]
+```
+
+## 7. Custom types: `struct` and `enum`
+
+### Struct ("has all of these fields")
+
+```rust
+#[derive(Debug, Clone, PartialEq)]   // auto-implement printing, cloning, ==
+struct Patient {
+    id: u32,
+    name: String,
+    age: u8,
+}
+
+impl Patient {
+    // associated function (like a static constructor in C#)
+    fn new(id: u32, name: &str, age: u8) -> Self {
+        Self { id, name: name.to_string(), age }
+    }
+
+    // method: &self = read-only borrow of the instance
+    fn is_adult(&self) -> bool {
+        self.age >= 18
+    }
+}
+
+// Tuple struct and unit struct
+struct Meters(f64);     // "newtype" pattern: type-safe wrapper
+struct Marker;          // no data
+
+let p = Patient::new(1, "Somchai", 45);
+println!("{:?} adult={}", p, p.is_adult());
+```
+
+Data (`struct`) and behavior (`impl`) are separate blocks, and there's **no inheritance**. Shared behavior comes from **traits**, which are like C# interfaces.
+
+### Enum ("is exactly one of these variants")
+
+This is Rust's superpower. It's closest to **Dart 3 sealed classes**, since each variant can carry different data:
+
+```rust
+enum Shape {
+    Circle { radius: f64 },
+    Rectangle { w: f64, h: f64 },
+    Triangle(f64, f64, f64),
+}
+
+impl Shape {
+    fn area(&self) -> f64 {
+        match self {                       // must handle EVERY variant
+            Shape::Circle { radius } => std::f64::consts::PI * radius * radius,
+            Shape::Rectangle { w, h } => w * h,
+            Shape::Triangle(a, b, c) => {
+                let s = (a + b + c) / 2.0;
+                (s * (s - a) * (s - b) * (s - c)).sqrt()
+            }
+        }
+    }
+}
+```
+
+If you later add `Shape::Hexagon`, every `match` that doesn't handle it becomes a **compile error**. That's what makes refactoring safe.
+
+### The two most important enums: `Option` and `Result`
+
+Rust has **no null** and **no exceptions**. Instead:
+
+```rust
+enum Option<T> { Some(T), None }          // value may be absent
+enum Result<T, E> { Ok(T), Err(E) }       // operation may fail
+```
+
+```rust
+fn find_age(name: &str) -> Option<u8> {
+    if name == "KS" { Some(40) } else { None }
+}
+
+fn parse_age(text: &str) -> Result<u8, std::num::ParseIntError> {
+    text.parse::<u8>()
+}
+
+match find_age("KS") {
+    Some(age) => println!("Age: {age}"),
+    None => println!("Not found"),
+}
+
+// The ? operator: "return the error early, otherwise unwrap"
+fn double_age(text: &str) -> Result<u16, std::num::ParseIntError> {
+    let age = parse_age(text)?;       // like try/catch, but explicit in the type
+    Ok(age as u16 * 2)
+}
+```
+
+```
+  C# / Python / R             Rust
+  ──────────────              ────
+  null / None / NULL    →     Option<T>   (compiler forces you to check)
+  throw / raise / stop  →     Result<T,E> (error is part of the signature)
+```
+
+## 8. Standard collections
+
+```rust
+use std::collections::{HashMap, HashSet, VecDeque, BTreeMap};
+
+// Vec<T>: growable array, used 90% of the time
+let mut v: Vec<i32> = Vec::new();
+v.push(1);
+v.extend([2, 3]);
+let doubled: Vec<i32> = v.iter().map(|x| x * 2).collect();
+
+// HashMap<K, V>
+let mut scores: HashMap<String, u32> = HashMap::new();
+scores.insert("Alice".to_string(), 90);
+*scores.entry("Bob".to_string()).or_insert(0) += 5;   // upsert idiom
+if let Some(s) = scores.get("Alice") { println!("{s}"); }
+
+// HashSet<T>
+let tags: HashSet<&str> = ["ct", "mri", "ct"].into_iter().collect(); // {"ct","mri"}
+
+// VecDeque<T>: fast push/pop at both ends (queue)
+let mut q: VecDeque<i32> = VecDeque::new();
+q.push_back(1);
+q.push_front(0);
+q.pop_front();
+
+// BTreeMap<K, V>: sorted by key
+let mut sorted: BTreeMap<u32, &str> = BTreeMap::new();
+sorted.insert(3, "c");
+sorted.insert(1, "a");   // iterates in order: 1, 3
+```
+
+| Rust | Python | C# | R |
+|---|---|---|---|
+| `Vec<T>` | `list` | `List<T>` | atomic vector / `list` |
+| `[T; N]` | (none) | `T[]` (fixed) | — |
+| `HashMap<K,V>` | `dict` | `Dictionary<K,V>` | named list / env |
+| `BTreeMap<K,V>` | (sorted dict, 3rd-party) | `SortedDictionary<K,V>` | — |
+| `HashSet<T>` | `set` | `HashSet<T>` | `unique()` |
+| `VecDeque<T>` | `collections.deque` | `Queue<T>` / `LinkedList<T>` | — |
+| `BinaryHeap<T>` | `heapq` | `PriorityQueue<T,P>` | — |
+| `struct` | `@dataclass` | `struct` / `record` | `list` / S4 |
+| `enum` with data | (no direct equivalent) | class hierarchy | — |
+
+## 9. A quick mental summary
+
+```
+ Need one value?                → scalar (i32, f64, bool, char)
+ Fixed small group, mixed?      → tuple
+ Fixed count, same type?        → array [T; N]
+ Growable list?                 → Vec<T>
+ Text you own / text you read?  → String / &str
+ Read-only view of a sequence?  → &[T]
+ Named fields?                  → struct
+ "One of several shapes"?       → enum + match
+ Maybe missing? Might fail?     → Option<T> / Result<T, E>
+ Key → value lookup?            → HashMap (fast) / BTreeMap (sorted)
+```
+
+You can run all of these snippets instantly at **play.rust-lang.org** without installing anything. Locally, `cargo new playground && cargo run` gets you started.
+
+The `&`, `mut`, and "owns the heap buffer" ideas above all come from **ownership and borrowing**, which is the natural next topic and the key to why `String` vs `&str` exists.
