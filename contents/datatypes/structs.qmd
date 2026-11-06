@@ -1,0 +1,247 @@
+---
+title: "Structs in Rust"
+---
+
+
+A **struct** is a custom data type that groups related values under one name. If you know C# or Dart, think of a class with only fields. The key difference is that in Rust, **data and behavior are kept apart**:
+
+```
+   C# / Dart / Python class            Rust
+  ┌─────────────────────────┐    ┌──────────────┐
+  │ fields                  │    │ struct       │ ← data only
+  │ constructor             │    ├──────────────┤
+  │ methods                 │ →  │ impl block   │ ← behavior (methods, constructors)
+  │ inheritance (extends)   │    ├──────────────┤
+  │ interfaces (implements) │    │ trait impls  │ ← shared behavior (≈ interfaces)
+  └─────────────────────────┘    └──────────────┘
+                                  No inheritance: composition + traits instead
+```
+
+---
+
+## 1. Defining and creating a struct
+
+```rust
+struct User {
+    username: String,
+    email: String,
+    active: bool,
+    login_count: u64,
+}
+```
+
+To create an instance, you must give a value for **every** field. Rust has no default `null`:
+
+```rust
+let user1 = User {
+    username: String::from("lightbridge"),
+    email: String::from("lb@example.com"),
+    active: true,
+    login_count: 0,
+};
+println!("{}", user1.email); // dot access, as you'd expect
+```
+
+**Mutability applies to the whole instance, not to single fields.** Rust has no `mut` on individual fields:
+
+```rust
+let mut user2 = User { /* ... */ };
+user2.login_count += 1;   // OK, because user2 is `mut`
+// user1.active = false;  // ❌ compile error: user1 is immutable
+```
+
+**Field init shorthand.** When a variable has the same name as a field, you can write the name once, like JS object shorthand:
+
+```rust
+fn build_user(username: String, email: String) -> User {
+    User { username, email, active: true, login_count: 0 }
+}
+```
+
+**Struct update syntax.** This works like JS spread, but with one ownership catch:
+
+```rust
+let user3 = User {
+    email: String::from("new@example.com"),
+    ..user1          // take the remaining fields from user1
+};
+// ⚠️ user1.username (a String) was MOVED into user3.
+// user1 can no longer be used as a whole.
+```
+
+The `bool` and `u64` fields are copied, but `String` is moved. This is the first place where structs and ownership meet.
+
+---
+
+## 2. Three kinds of structs
+
+```
+┌────────────────────┬─────────────────────────────┬────────────────────────────┐
+│ Kind               │ Syntax                      │ Typical use                │
+├────────────────────┼─────────────────────────────┼────────────────────────────┤
+│ Named-field        │ struct User { name: String }│ Most data models           │
+│ Tuple struct       │ struct Meters(f64);         │ Newtypes, small groupings  │
+│ Unit-like struct   │ struct Marker;              │ Types that carry no data,  │
+│                    │                             │ used to implement traits   │
+└────────────────────┴─────────────────────────────┴────────────────────────────┘
+```
+
+The **newtype pattern** with tuple structs is very idiomatic. It gives you type safety for free:
+
+```rust
+struct Meters(f64);
+struct Feet(f64);
+
+fn run(distance: Meters) { println!("{} m", distance.0); } // .0 = first field
+
+run(Meters(5.0));    // ✅
+// run(Feet(5.0));   // ❌ different types, even though both wrap f64
+```
+
+---
+
+## 3. Adding behavior with `impl`
+
+Methods and constructors go in an `impl` block:
+
+```rust
+struct Rectangle { width: f64, height: f64 }
+
+impl Rectangle {
+    // Associated function (no self): like a static method. `new` is just a convention.
+    fn new(width: f64, height: f64) -> Self { Self { width, height } }
+    fn square(size: f64) -> Self { Self::new(size, size) }
+
+    fn area(&self) -> f64 { self.width * self.height }   // read-only borrow
+    fn scale(&mut self, k: f64) { self.width *= k; self.height *= k; } // mutable borrow
+    fn into_dims(self) -> (f64, f64) { (self.width, self.height) }    // takes ownership
+}
+```
+
+The type of the `self` receiver is the important part. It says what the method does to the instance:
+
+```
+  Receiver     Meaning                     After the call...        Python/C# analogy
+  ─────────    ─────────────────────────   ──────────────────────   ─────────────────
+  &self        borrow, read only           caller still owns it     normal getter
+  &mut self    borrow, may modify          caller still owns it     setter / mutator
+  self         take ownership (consume)    caller can't use it      (no equivalent)
+  (none)       associated function         -                        @staticmethod / static
+```
+
+Using it:
+
+```rust
+let mut r = Rectangle::new(3.0, 4.0);   // `::` for associated functions
+println!("{}", r.area());               // `.` for methods → 12
+r.scale(2.0);
+let (w, h) = r.into_dims();             // r is consumed here
+// r.area();                            // ❌ use after move
+```
+
+Rust adds `&` and `&mut` for you automatically when you call methods (*auto-referencing*). That's why you write `r.area()` and not `(&r).area()`.
+
+You can also have **several `impl` blocks** for one struct. That's handy for grouping related functionality.
+
+---
+
+## 4. Getting free behavior with `#[derive]`
+
+A struct can't be printed, compared, or cloned until it implements the matching traits. For common traits, the compiler can write the code for you:
+
+```rust
+#[derive(Debug, Clone, PartialEq)]
+struct Point { x: i32, y: i32 }
+
+let p = Point { x: 1, y: 2 };
+println!("{:?}", p);    // Point { x: 1, y: 2 }
+println!("{:#?}", p);   // pretty-printed over several lines
+let q = p.clone();
+assert_eq!(p, q);       // needs PartialEq
+```
+
+Common derives are `Debug`, `Clone`, `Copy` (only if every field is `Copy`), `PartialEq`/`Eq`, `Hash`, and `Default`. This is roughly like Python's `@dataclass` generating `__repr__` and `__eq__`.
+
+---
+
+## 5. Memory layout: where does a struct live?
+
+A struct is stored **inline**, wherever you put it: on the stack, inside another struct, or inside a `Vec`. It is not automatically on the heap like a C# class object. Only fields that own heap data point to the heap:
+
+```
+  STACK (user1)                               HEAP
+ ┌──────────────────────────────┐
+ │ username: ptr ───────────────┼───────► "lightbridge"
+ │           len = 11, cap = 11 │
+ │ email:    ptr ───────────────┼───────► "lb@example.com"
+ │           len = 14, cap = 14 │
+ │ active:   true               │
+ │ login_count: 0               │
+ └──────────────────────────────┘
+```
+
+Note that the Rust compiler is free to **reorder fields** to reduce padding. If you need a C-compatible layout, for example for FFI, use `#[repr(C)]`.
+
+On semantics: Rust structs act like C# **structs**, not classes. They are values, and assignment **moves** them (or copies them, if `Copy`). Shared references exist only through explicit borrows (`&`) or smart pointers (`Rc`, `Arc`).
+
+---
+
+## 6. Storing references inside a struct needs lifetimes
+
+Owned fields like `String` are the simple default. If a struct holds a **reference**, you have to tell the compiler how long that reference must stay valid:
+
+```rust
+struct Excerpt<'a> {
+    text: &'a str,   // "an Excerpt can't outlive the string it borrows"
+}
+```
+
+A good rule while learning is to **use owned types in structs** (`String`, `Vec<T>`) until you have a clear reason to borrow.
+
+---
+
+## 7. Visibility and encapsulation
+
+Privacy works at the **module** level, and it is private by default. A `pub` struct can still have private fields:
+
+```rust
+pub mod geometry {
+    pub struct Circle { radius: f64 }          // field is private
+
+    impl Circle {
+        pub fn new(radius: f64) -> Option<Self> {
+            if radius > 0.0 { Some(Self { radius }) } else { None }
+        }
+        pub fn radius(&self) -> f64 { self.radius }
+    }
+}
+```
+
+Code outside the `geometry` module **cannot** write `Circle { radius: -1.0 }`. It has to go through `new`, so the rule "radius > 0" is guaranteed by the type system. This is the "make invalid states unrepresentable" idea, and it fits well with the SOLID and clean-architecture style you prefer.
+
+---
+
+## Quick comparison with languages you know
+
+```
+┌──────────────┬──────────────────┬──────────────────┬──────────────────────┐
+│              │ Rust struct      │ C# class         │ Python @dataclass    │
+├──────────────┼──────────────────┼──────────────────┼──────────────────────┤
+│ Semantics    │ value (move)     │ reference        │ reference            │
+│ Null fields  │ impossible¹      │ possible         │ possible (None)      │
+│ Constructor  │ convention (new) │ keyword          │ auto __init__        │
+│ Inheritance  │ none             │ yes              │ yes                  │
+│ Interfaces   │ traits           │ interface        │ Protocol / ABC       │
+│ Mutability   │ per binding      │ per field        │ per field (frozen=)  │
+└──────────────┴──────────────────┴──────────────────┴──────────────────────┘
+ ¹ "Maybe absent" is written explicitly as Option<T>
+```
+
+---
+
+### Key takeaways
+1. A `struct` holds **data**, `impl` holds **behavior**, and traits provide **shared behavior** (polymorphism).
+2. Mutability belongs to the **binding**, not to individual fields.
+3. The receiver (`&self`, `&mut self`, `self`) tells you how each method treats ownership.
+4. Structs are **values**: they move by default, and you opt into `Clone`/`Copy`.
+5. Private fields plus a `new` constructor give you strong encapsulation.
