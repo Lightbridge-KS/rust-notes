@@ -21,6 +21,10 @@ book:
           href: "contents/datatypes/structs.qmd"
         - text: Enums
           href: "contents/datatypes/enums.qmd"
+    - part: Function
+      chapters: 
+        - text: Closure
+          href: "contents/func/closure.qmd"
     - part: Concept
       chapters: 
        - text: Ownership

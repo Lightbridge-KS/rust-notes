@@ -1,0 +1,132 @@
+---
+title: "Closure (anonymous function)"
+---
+
+## `|n|` is a closure (anonymous function)
+
+When you see `|n|` in Rust, it's almost always the **parameter list of a closure**. The pipes play the same role as parentheses in a normal function signature.
+
+```rust
+let add_one = |n| n + 1;
+println!("{}", add_one(5)); // 6
+```
+
+You already know this idea from other languages:
+
+```
+Rust        |n| n + 1
+Python      lambda n: n + 1
+C#          n => n + 1
+JavaScript  n => n + 1
+R           \(n) n + 1        (or function(n) n + 1)
+Dart        (n) => n + 1
+```
+
+### Anatomy
+
+```
+    |a, b|   a + b
+    └─┬──┘   └─┬─┘
+  parameters   body (an expression; its value is returned)
+
+    |x: i32| -> i32 { let y = x * 2; y + 1 }
+     └──┬──┘   └┬─┘ └────────┬──────────────┘
+  optional type  optional    block body for
+  annotation     return type multiple statements
+```
+
+The variations you'll see:
+
+```rust
+let say_hi = || println!("hi");            // zero params: empty pipes ||
+let square = |x| x * x;                     // one param, types inferred
+let add    = |a, b| a + b;                  // multiple params
+let typed  = |x: f64| -> f64 { x.sqrt() };  // explicit types (needs braces if -> used)
+let multi  = |x: i32| {                      // multi-line body
+    let doubled = x * 2;
+    doubled + 1                              // last expression = return value
+};
+```
+
+Unlike `fn`, closures usually don't need type annotations because the compiler infers them from usage. One gotcha: once inferred, the type is locked in. Calling `square(2)` and then `square(2.0)` is a compile error, not a generic function.
+
+### Where you'll see it most: iterators
+
+This is the idiomatic pattern, very similar to Python comprehensions, LINQ in C#, or `purrr::map` in R:
+
+```rust
+let nums = vec![1, 2, 3, 4, 5];
+
+let evens_squared: Vec<i32> = nums
+    .iter()
+    .filter(|n| *n % 2 == 0)   // keep evens
+    .map(|n| n * n)            // square them
+    .collect();                // [4, 16]
+```
+
+(The `*n` is there because `.iter()` yields references; the filter callback receives a `&&i32`. That's a borrowing detail worth its own Q&A later.)
+
+### What makes closures different from `fn`: capturing the environment
+
+A closure can "remember" variables from the scope where it was defined. A plain `fn` cannot.
+
+```rust
+let threshold = 10;
+let is_big = |n: i32| n > threshold;   // captures `threshold`
+
+println!("{}", is_big(15)); // true
+```
+
+```
+  ┌─ enclosing scope ──────────────────┐
+  │  threshold = 10                    │
+  │       ▲                            │
+  │       │ borrowed (captured)        │
+  │  ┌────┴──────────────────────┐     │
+  │  │ is_big = |n| n > threshold│     │
+  │  └───────────────────────────┘     │
+  └────────────────────────────────────┘
+```
+
+Because Rust has ownership rules, *how* a closure captures matters, and the compiler classifies every closure into one of three traits automatically:
+
+```
+Trait     How it uses captured vars    Can be called...
+───────   ──────────────────────────   ────────────────
+Fn        reads them (&T)              many times
+FnMut     mutates them (&mut T)        many times, needs `mut`
+FnOnce    consumes/moves them (T)      only once
+```
+
+```rust
+let mut count = 0;
+let mut inc = || count += 1;   // FnMut: mutates `count`
+inc();
+inc();
+println!("{count}"); // 2
+```
+
+And the `move` keyword forces the closure to take ownership of what it captures, which you'll need when sending closures to threads:
+
+```rust
+let name = String::from("RAMAAI");
+let greet = move || println!("Hello, {name}");
+// `name` is now owned by the closure; can't use it here anymore
+greet();
+```
+
+### Don't confuse with other uses of `|`
+
+The pipe character has a few other meanings in Rust, so context matters:
+
+```rust
+let a = 0b1010 | 0b0101;          // bitwise OR → 0b1111
+let ok = x > 0 || y > 0;          // logical OR (two pipes, between booleans)
+
+match n {
+    1 | 2 | 3 => println!("small"), // "or" pattern in match
+    _ => println!("other"),
+}
+```
+
+A quick rule of thumb: if pipes appear where a *value* is expected (passed to `.map(...)`, assigned to a `let`, etc.) and wrap names, it's a closure. `||` as a closure means "takes no arguments," while `||` between two booleans is logical OR.
