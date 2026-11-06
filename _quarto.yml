@@ -19,6 +19,8 @@ book:
          href: "contents/concept/rust-ownership.qmd"
        - text: Onewriter XOR Manyreader
          href: "contents/concept/onewriter-xor-manyreader.qmd"
+       - text: Coercion
+         href: "contents/concept/coercion.qmd"
     - part: Tooling
       chapters: 
         - text: Cargo Commands

@@ -1,0 +1,246 @@
+---
+title: "Coercion in Rust"
+---
+
+
+## 1. The big idea
+
+A **coercion** is an implicit type conversion that the compiler inserts for you. Rust is deliberately stingy with these. Compared with C#, it has:
+
+- no implicit numeric widening (`i32` won't become `i64` on its own),
+- no user-defined `implicit operator`,
+- only a short, fixed list of conversions, mostly about pointers and references.
+
+```rust
+let a: i32 = 5;
+let b: i64 = a;          // ❌ mismatched types
+let b: i64 = a as i64;   // ✅ explicit cast
+let b: i64 = a.into();   // ✅ explicit conversion via From/Into
+```
+
+Coercions also only happen at specific **coercion sites**, where the compiler already knows the *expected* type:
+
+```
+ Coercion sites (expected type is known)
+ ─────────────────────────────────────────────
+ let x: Target = expr;          // annotated let
+ f(expr)                        // function / method argument
+ Struct { field: expr }         // struct field initializer
+ return expr / tail expression  // function return
+ static / const X: T = expr;
+```
+
+## 2. The coercion catalog
+
+```
+ ┌────────────────────────────────────────────────────────────────┐
+ │ 1. Mutability weakening   &mut T      →  &T                    │
+ │ 2. Deref coercion         &U          →  &T   (U: Deref<T>)    │
+ │ 3. Unsized coercion       &[T; N]     →  &[T]                  │
+ │                           &Concrete   →  &dyn Trait            │
+ │ 4. Fn item / closure      fn item     →  fn pointer            │
+ │ 5. Never type             !           →  any T                 │
+ │ (6. Raw pointer forms     &T → *const T,  &mut T → *mut T)     │
+ └────────────────────────────────────────────────────────────────┘
+```
+
+### 2.1 Mutability weakening: `&mut T → &T`
+
+You can always give up write access, but you can never gain it.
+
+```rust
+fn read(x: &i32) { println!("{x}"); }
+
+let mut n = 10;
+let r: &mut i32 = &mut n;
+read(r);          // ✅ &mut i32 → &i32
+
+// The reverse (&T → &mut T) never happens. That would break the borrow rules.
+```
+
+### 2.2 Deref coercion: `&U → &T`
+
+If `U` implements `Deref<Target = T>`, then `&U` coerces to `&T`. The compiler applies this **repeatedly** until the types match.
+
+```rust
+fn greet(name: &str) { println!("Hello, {name}"); }
+fn total(xs: &[i32]) -> i32 { xs.iter().sum() }
+
+let s = String::from("KS");
+greet(&s);                     // &String → &str
+
+let v = vec![1, 2, 3];
+total(&v);                     // &Vec<i32> → &[i32]
+
+let b: Box<String> = Box::new("LB".to_string());
+greet(&b);                     // &Box<String> → &String → &str  (2 hops!)
+```
+
+```
+   &Box<String> ──Deref──▶ &String ──Deref──▶ &str
+        │                     │                  │
+   Box::deref()        String::deref()       target ✓
+```
+
+Common `Deref` implementations in the standard library:
+
+| Type `U` | `Deref::Target` | So `&U` coerces to |
+|---|---|---|
+| `String` | `str` | `&str` |
+| `Vec<T>` | `[T]` | `&[T]` |
+| `Box<T>` | `T` | `&T` |
+| `Rc<T>` / `Arc<T>` | `T` | `&T` |
+| `PathBuf` | `Path` | `&Path` |
+| `OsString` | `OsStr` | `&OsStr` |
+
+Deref coercion has three mutability variants:
+
+```
+ &U      → &T       requires  U: Deref<Target=T>
+ &mut U  → &mut T   requires  U: DerefMut<Target=T>
+ &mut U  → &T       requires  U: Deref<Target=T>   (also weakens mutability)
+```
+
+### 2.3 Unsized coercion: sized becomes dynamically sized
+
+This turns a pointer to something with a compile-time-known size into a **fat pointer** to something whose size is only known at runtime.
+
+**Array to slice:**
+
+```rust
+let arr: [i32; 3] = [10, 20, 30];
+let s: &[i32] = &arr;             // &[i32; 3] → &[i32]
+```
+
+```
+ &[i32; 3]  (thin pointer)          &[i32]  (fat pointer)
+ ┌──────┐                          ┌──────┬───────┐
+ │ ptr  │                          │ ptr  │ len=3 │   ← length moves
+ └──────┘                          └──────┴───────┘     from type to runtime
+  length "3" lives in the TYPE
+```
+
+**Concrete type to trait object:**
+
+```rust
+trait Shape { fn area(&self) -> f64; }
+struct Circle { r: f64 }
+impl Shape for Circle { fn area(&self) -> f64 { 3.14159 * self.r * self.r } }
+
+let c = Circle { r: 2.0 };
+let s: &dyn Shape = &c;                       // &Circle → &dyn Shape
+let b: Box<dyn Shape> = Box::new(Circle { r: 1.0 }); // Box<Circle> → Box<dyn Shape>
+```
+
+```
+ &dyn Shape (fat pointer)
+ ┌──────┬────────┐
+ │ data │ vtable │──▶ ┌──────────────┐
+ └──┬───┴────────┘    │ size, align  │
+    ▼                 │ drop_in_place│
+  Circle{r:2.0}       │ area() ──────┼──▶ Circle::area
+                      └──────────────┘
+```
+
+This works through `&`, `&mut`, `Box`, `Rc`, `Arc`, raw pointers, and `Pin` (they implement the `CoerceUnsized` trait). So `Box<[i32; 3]>` also coerces to `Box<[i32]>`.
+
+### 2.4 Function items and closures to `fn` pointers
+
+Every named function has its own unique, zero-sized type. It coerces to a plain function pointer when needed. A closure that **captures nothing** does too.
+
+```rust
+fn add_one(x: i32) -> i32 { x + 1 }
+fn times_two(x: i32) -> i32 { x * 2 }
+
+let ops: [fn(i32) -> i32; 3] = [add_one, times_two, |x| x - 3];
+//                               ^fn item  ^fn item   ^non-capturing closure
+```
+
+A closure that captures variables cannot become an `fn` pointer. For those, you use `impl Fn` or `Box<dyn Fn>`.
+
+### 2.5 The never type `!` coerces to anything
+
+Expressions that never produce a value (`panic!`, `return`, `continue`, `loop {}` with no break) have type `!`, which fits wherever a type is expected:
+
+```rust
+let n: i32 = match input.parse() {
+    Ok(v)  => v,                 // i32
+    Err(_) => panic!("bad"),     // ! → i32
+};
+```
+
+## 3. Don't confuse coercion with method-call auto-deref
+
+The dot operator has its **own** mechanism. It auto-references and auto-dereferences the receiver until it finds a matching method:
+
+```rust
+let v = vec![1, 2, 3];
+let r = &&&v;
+r.len();        // compiler tries &&&Vec, &&Vec, &Vec, Vec, [i32]... finds [T]::len
+```
+
+```
+ Coercion           → happens at a coercion site, needs an expected type
+ Auto-deref (dot)   → happens on method receivers, searches for the method
+```
+
+They feel similar, but auto-deref works even in places where coercion wouldn't.
+
+## 4. Where coercion does NOT happen (common gotchas)
+
+**Gotcha 1: generic trait bounds.** Coercion needs a known target type, and a generic `T` is inferred from the argument rather than fixed in advance:
+
+```rust
+trait Shout { fn shout(&self); }
+impl Shout for &str { fn shout(&self) { println!("{}!", self.to_uppercase()); } }
+
+fn call<T: Shout>(x: T) { x.shout(); }
+
+let s = String::from("hi");
+call(&s);          // ❌ T = &String, and &String doesn't impl Shout
+call(s.as_str());  // ✅ be explicit
+call(&*s);         // ✅ also explicit: deref String → str, then borrow
+```
+
+**Gotcha 2: no coercion inside containers.** Coercion applies to the outer pointer, not to the elements:
+
+```rust
+let names: Vec<String> = vec!["a".into(), "b".into()];
+let v: &[String] = &names;          // ✅ &Vec<String> → &[String]
+let w: &[&str]  = &names;           // ❌ String elements won't become &str
+let w: Vec<&str> = names.iter().map(|s| s.as_str()).collect(); // ✅ explicit
+```
+
+**Gotcha 3: branches need a common type.** For `if`/`match` arms, the compiler tries to find a common type, but it often needs your annotation to know you want `dyn`:
+
+```rust
+struct Square { a: f64 }
+impl Shape for Square { fn area(&self) -> f64 { self.a * self.a } }
+
+let shape = if big { Box::new(Circle { r: 5.0 }) } else { Box::new(Square { a: 1.0 }) };
+// ❌ Box<Circle> vs Box<Square>
+
+let shape: Box<dyn Shape> = if big { Box::new(Circle { r: 5.0 }) }
+                            else   { Box::new(Square { a: 1.0 }) };
+// ✅ the expected type drives both arms to coerce
+```
+
+## 5. Design takeaways
+
+Since you value clean API design, here are the practical lessons.
+
+**Accept the "borrowed, unsized" form in parameters.** Because of coercion, the most general parameter type is the most convenient for callers:
+
+| Instead of | Prefer | Callers can pass |
+|---|---|---|
+| `&String` | `&str` | `&String`, `&str`, `&Box<str>`, string literals |
+| `&Vec<T>` | `&[T]` | `&Vec<T>`, `&[T; N]`, `&Box<[T]>` |
+| `&PathBuf` | `&Path` | `&PathBuf`, `&Path` |
+| `&Box<T>` | `&T` | almost anything holding a `T` |
+
+Clippy will flag the left-column versions with the `ptr_arg` lint. This is the Rust flavor of "depend on the narrowest abstraction you need."
+
+**Implement `Deref` only for smart-pointer-like types.** Since `Deref` is the *only* user-extensible implicit conversion, it's tempting to abuse it to fake inheritance (for example, `impl Deref for Employee { type Target = Person; }`). This is a known anti-pattern ("Deref polymorphism"). It makes method resolution surprising and hides the relationship. For "is-a" style reuse, prefer traits; for "has-a," prefer composition with explicit delegation.
+
+**Prefer explicit conversions for value changes.** Use `From`/`Into`, `TryFrom`, or `as`. Coercion in Rust is about *viewing* data differently (through a different kind of pointer), never about silently changing the data itself.
+
