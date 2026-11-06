@@ -1,0 +1,366 @@
+---
+title: "Traits in Rust"
+---
+
+A **trait** describes behavior that many types can share: "any type that implements this trait can do these things." If you know C# interfaces, Dart abstract classes, or Python `Protocol`s, you already have most of the idea. Rust then adds a few abilities those languages don't have.
+
+This completes the picture from the first lesson:
+
+```
+   ┌──────────────┐     ┌──────────────┐     ┌────────────────────────┐
+   │ struct/enum  │     │ impl Type    │     │ impl Trait for Type    │
+   │   (data)     │  +  │ (its own     │  +  │ (shared behavior       │
+   │              │     │  methods)    │     │  contract)             │
+   └──────────────┘     └──────────────┘     └────────────────────────┘
+     WHAT it is          WHAT it can do        WHAT it has in common
+                                               with other types
+```
+
+---
+
+## 1. Defining and implementing a trait
+
+```rust
+trait Shape {
+    fn area(&self) -> f64;                 // required: implementors must write it
+    fn name(&self) -> String {             // default: implementors may override it
+        String::from("unknown shape")
+    }
+}
+```
+
+```rust
+struct Circle { radius: f64 }
+struct Rect   { w: f64, h: f64 }
+
+impl Shape for Circle {
+    fn area(&self) -> f64 { std::f64::consts::PI * self.radius.powi(2) }
+    fn name(&self) -> String { "circle".into() }   // overrides the default
+}
+
+impl Shape for Rect {
+    fn area(&self) -> f64 { self.w * self.h }      // keeps the default name()
+}
+```
+
+Note that the trait implementation is a **separate block** from the type definition. You can add a trait to a type long after the type was written, even in a different file or module. In C#, a class has to list its interfaces when it is declared.
+
+Default methods can call required methods. This is how a small trait can provide a lot of functionality:
+
+```rust
+trait Shape {
+    fn area(&self) -> f64;
+    fn is_large(&self) -> bool { self.area() > 100.0 }  // built on area()
+}
+```
+
+---
+
+## 2. Using traits: writing code for "any type that…"
+
+There are three common ways to write it. They mean the same thing here:
+
+```rust
+// 1. impl Trait in argument position: the shortest form
+fn print_area(s: &impl Shape) {
+    println!("area = {:.2}", s.area());
+}
+
+// 2. Generic with a trait bound: the full form
+fn print_area<T: Shape>(s: &T) { /* ... */ }
+
+// 3. where clause: easier to read when there are many bounds
+fn print_area<T>(s: &T) where T: Shape { /* ... */ }
+```
+
+You can combine bounds with `+`:
+
+```rust
+fn report<T: Shape + std::fmt::Debug>(s: &T) {
+    println!("{:?} has area {}", s, s.area());
+}
+```
+
+A practical generic function:
+
+```rust
+fn largest<T: PartialOrd>(items: &[T]) -> Option<&T> {
+    let mut best = items.first()?;        // `?` on Option: return None if empty
+    for item in items {
+        if item > best { best = item; }   // `>` works because T: PartialOrd
+    }
+    Some(best)
+}
+```
+
+Without `T: PartialOrd`, the compiler rejects `item > best`. It won't assume that an arbitrary `T` can be compared. **The trait bound is the permission.**
+
+---
+
+## 3. Static vs dynamic dispatch
+
+This is the most important design decision with traits. Rust lets **you** choose how a trait method call is resolved.
+
+**Static dispatch (generics, `impl Trait`).** The compiler generates a separate copy of the function for each concrete type you use. This is called *monomorphization*:
+
+```
+  Source code:                       What the compiler generates:
+  ┌──────────────────────────┐       ┌──────────────────────────────┐
+  │ fn print_area<T: Shape>  │  ──►  │ fn print_area_Circle(&Circle)│
+  │     (s: &T)              │       │ fn print_area_Rect(&Rect)    │
+  └──────────────────────────┘       └──────────────────────────────┘
+  ✅ Zero runtime cost, calls can be inlined
+  ⚠️ Larger binary; one call can only hold ONE concrete type
+```
+
+**Dynamic dispatch (`dyn Trait`).** The concrete type is decided at runtime through a lookup table, like virtual methods in C#:
+
+```rust
+let shapes: Vec<Box<dyn Shape>> = vec![
+    Box::new(Circle { radius: 1.0 }),
+    Box::new(Rect { w: 2.0, h: 3.0 }),
+];                                       // mixed types in one Vec ✅
+
+let total: f64 = shapes.iter().map(|s| s.area()).sum();
+```
+
+A `&dyn Shape` or `Box<dyn Shape>` is a **fat pointer**, made of two pointers:
+
+```
+  Box<dyn Shape>
+ ┌──────────────┬──────────────┐
+ │ data ptr ────┼──┐           │
+ │ vtable ptr ──┼──┼─────┐     │
+ └──────────────┴──┼─────┼─────┘
+                   ▼     ▼
+           ┌──────────┐ ┌──────────────────────────┐
+  heap:    │ Circle   │ │ vtable for Circle:       │
+           │ radius:1 │ │  area → Circle::area     │
+           └──────────┘ │  name → Circle::name     │
+                        │  drop, size, align       │
+                        └──────────────────────────┘
+```
+
+```
+┌───────────────────┬───────────────────────────┬────────────────────────────┐
+│                   │ Generics / impl Trait     │ dyn Trait                  │
+├───────────────────┼───────────────────────────┼────────────────────────────┤
+│ Resolved          │ compile time              │ runtime (vtable)           │
+│ Speed             │ fastest (inlinable)       │ small indirection cost     │
+│ Mixed collections │ ❌                        │ ✅ Vec<Box<dyn Shape>>     │
+│ Binary size       │ grows per type            │ one copy                   │
+│ Default choice?   │ ✅ yes                    │ when heterogeneity needed  │
+└───────────────────┴───────────────────────────┴────────────────────────────┘
+```
+
+Not every trait can be used as `dyn`. A trait is **dyn-compatible** (formerly called "object safe") only if its methods don't, for example, return `Self` or have their own generic type parameters. The vtable needs a fixed set of concrete functions, and those features would prevent that.
+
+You can also return a trait from a function:
+
+```rust
+fn make_shape() -> impl Shape { Circle { radius: 2.0 } }  // one hidden concrete type
+
+fn pick(big: bool) -> Box<dyn Shape> {                     // can differ at runtime
+    if big { Box::new(Rect { w: 9.0, h: 9.0 }) } else { Box::new(Circle { radius: 1.0 }) }
+}
+```
+
+---
+
+## 4. Associated types
+
+Some traits need a type as a placeholder inside them. The best-known example is `Iterator`:
+
+```rust
+struct Countdown(u32);
+
+impl Iterator for Countdown {
+    type Item = u32;                          // associated type: "I yield u32s"
+    fn next(&mut self) -> Option<u32> {
+        if self.0 == 0 { return None; }
+        self.0 -= 1;
+        Some(self.0 + 1)
+    }
+}
+```
+
+You write only `next()`. In return you get **dozens of default methods** for free (`map`, `filter`, `sum`, `collect`, `zip`, …):
+
+```rust
+let total: u32 = Countdown(3).map(|x| x * 10).sum();   // 30 + 20 + 10 = 60
+```
+
+**When to use an associated type and when to use a generic parameter:**
+
+```
+  trait Iterator { type Item; }   → each type has ONE natural Item
+                                     (a Countdown can't yield both u32 and String)
+
+  trait From<T> { ... }           → a type can implement it MANY times
+                                     (String: From<&str>, From<char>, From<Box<str>> ...)
+```
+
+---
+
+## 5. Standard library traits you'll use constantly
+
+Many Rust features are just traits. Implement the trait, and the feature works for your type:
+
+```
+┌─────────────────┬────────────────────────────────┬──────────────────────────┐
+│ Trait           │ Unlocks                        │ Usually...               │
+├─────────────────┼────────────────────────────────┼──────────────────────────┤
+│ Debug           │ {:?} printing                  │ #[derive]                │
+│ Display         │ {} printing, .to_string()      │ manual impl              │
+│ Clone / Copy    │ .clone() / implicit copying    │ #[derive]                │
+│ PartialEq / Eq  │ == and !=                      │ #[derive]                │
+│ PartialOrd / Ord│ < > and .sort()                │ #[derive] or manual      │
+│ Hash            │ use as HashMap key             │ #[derive]                │
+│ Default         │ T::default()                   │ #[derive] or manual      │
+│ From / Into     │ type conversions, `?` errors   │ manual impl              │
+│ Iterator        │ for loops, .map(), .filter()   │ manual impl              │
+│ Add, Mul, ...   │ + * operators                  │ manual impl              │
+│ Drop            │ cleanup code (destructor)      │ manual impl (rarely)     │
+└─────────────────┴────────────────────────────────┴──────────────────────────┘
+```
+
+**`Display`: user-facing formatting**
+
+```rust
+use std::fmt;
+
+struct Point { x: i32, y: i32 }
+
+impl fmt::Display for Point {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "({}, {})", self.x, self.y)
+    }
+}
+// println!("{}", Point { x: 1, y: 2 });  → (1, 2)
+```
+
+**`From`: conversions (and you get `Into` for free)**
+
+```rust
+struct Celsius(f64);
+struct Fahrenheit(f64);
+
+impl From<Celsius> for Fahrenheit {
+    fn from(c: Celsius) -> Self { Fahrenheit(c.0 * 9.0 / 5.0 + 32.0) }
+}
+
+let f: Fahrenheit = Celsius(100.0).into();   // `.into()` works automatically
+```
+
+`From` is also what lets the `?` operator from the enums lesson convert error types automatically.
+
+**Operator overloading is just a trait**
+
+```rust
+use std::ops::Add;
+
+#[derive(Debug, Clone, Copy)]
+struct Vec2 { x: f64, y: f64 }
+
+impl Add for Vec2 {
+    type Output = Vec2;
+    fn add(self, o: Vec2) -> Vec2 { Vec2 { x: self.x + o.x, y: self.y + o.y } }
+}
+// let c = a + b;   ✅
+```
+
+---
+
+## 6. More powerful features
+
+**Supertraits: "to implement A, you must also implement B"**
+
+```rust
+trait Describe: std::fmt::Display {          // Describe requires Display
+    fn describe(&self) -> String {
+        format!("<<{}>>", self)              // allowed: self is guaranteed Display
+    }
+}
+```
+
+This looks like inheritance, but it is only a **requirement**, not inheritance. No fields or implementations are passed down.
+
+**Blanket implementations: implementing a trait for every type that meets a condition**
+
+This is how `Into` comes for free in the standard library:
+
+```rust
+impl<T, U> Into<U> for T where U: From<T> {
+    fn into(self) -> U { U::from(self) }
+}
+// "For EVERY T, if U can be built From<T>, then T is Into<U>."
+```
+
+You can write your own. For example, `impl<T: Display> Describe for T {}` gives `describe()` to every printable type at once.
+
+**The orphan rule (coherence)**
+
+```
+  You may write  `impl Trait for Type`  only if Trait OR Type is defined in your crate.
+
+  impl Shape   for Circle    ✅ both yours
+  impl Display for Circle    ✅ the type is yours
+  impl Shape   for Vec<i32>  ✅ the trait is yours
+  impl Display for Vec<i32>  ❌ neither is yours (std owns both)
+```
+
+This rule stops two libraries from defining conflicting implementations. The usual workaround is the **newtype pattern** from the structs lesson: `struct MyList(Vec<i32>);`, then implement `Display` for `MyList`.
+
+---
+
+## 7. Traits vs enums: choosing your polymorphism
+
+Now that you know both, you can make a real architectural choice. Both of these model "a shape that has an area":
+
+```
+  ENUM (closed set)                        TRAIT (open set)
+  enum Shape { Circle{..}, Rect{..} }      trait Shape { fn area(&self) -> f64; }
+
+  ✅ match is exhaustive                   ✅ anyone (other crates, plugins)
+  ✅ easy to add new OPERATIONS               can add new TYPES
+     (just write another fn with match)    ✅ easy to add new types
+  ❌ adding a VARIANT means updating       ❌ adding a new METHOD means
+     every match                              updating every impl
+  ✅ no heap / vtable needed               ⚠️ dyn requires Box/& + vtable
+
+  Use when: you own and know every case    Use when: the set of types must stay
+  (states, messages, AST nodes)            open (plugins, library extension points)
+```
+
+This trade-off is known as the **expression problem**. Rust gives you both tools, so choose based on which axis, operations or types, you expect to grow.
+
+---
+
+## Comparison with languages you know
+
+```
+┌─────────────────────┬──────────────┬──────────────┬────────────┬───────────────┐
+│ Feature             │ Rust trait   │ C# interface │ Dart       │ Python        │
+│                     │              │              │ abstract   │ Protocol/ABC  │
+├─────────────────────┼──────────────┼──────────────┼────────────┼───────────────┤
+│ Default methods     │ ✅           │ ✅ (C# 8+)   │ ✅         │ ✅            │
+│ Impl for existing   │ ✅           │ ❌ (only ext │ ❌ (only   │ ❌            │
+│ (foreign) types     │              │  methods)    │  extension)│               │
+│ Static dispatch     │ ✅ default   │ partial      │ ❌         │ ❌            │
+│ Associated types    │ ✅           │ ❌           │ ❌         │ ❌            │
+│ Blanket impls       │ ✅           │ ❌           │ ❌         │ ❌            │
+│ Operator overload   │ via traits   │ operator kw  │ operator kw│ __dunder__    │
+│ Fields / state      │ ❌ never     │ ❌           │ ✅         │ ✅            │
+└─────────────────────┴──────────────┴──────────────┴────────────┴───────────────┘
+```
+
+---
+
+### Key takeaways
+1. A trait is a **behavior contract**, implemented in a separate `impl Trait for Type` block. It can be added to existing types.
+2. **Default methods** let a small trait provide a lot of functionality (see `Iterator`).
+3. **Generics / `impl Trait`** give static dispatch with zero cost and are the default. **`dyn Trait`** gives runtime polymorphism through a vtable.
+4. Many language features (`==`, `+`, `{}`, `for`, `?`) are **powered by traits**.
+5. Rust has **no inheritance**. You build designs from structs, enums, and traits, and you choose between enums (closed set) and traits (open set) on purpose.
+
+You now have Rust's three building blocks: **structs, enums, and traits**. Good next topics are **ownership and borrowing in depth** (the thing that makes Rust unique), **generics and lifetimes** (expanding on the trait bounds above), or **iterators and closures** (where traits show up most in daily code).

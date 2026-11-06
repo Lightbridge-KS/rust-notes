@@ -21,6 +21,8 @@ book:
           href: "contents/datatypes/structs.qmd"
         - text: Enums
           href: "contents/datatypes/enums.qmd"
+        - text: Traits
+          href: "contents/datatypes/traits.qmd"
         - text: Option<T>
           href: "contents/datatypes/option.qmd"
     - part: Function
