@@ -1,0 +1,312 @@
+---
+title: "Enums in Rust"
+---
+
+In most languages, an enum is just a list of named constants. In Rust, an enum is much more: **each variant can carry its own data**. This makes enums one of Rust's most important tools for modeling a domain.
+
+---
+
+## 1. The core idea: "AND" vs "OR"
+
+Last time, structs combined values with **AND**. Enums combine them with **OR**:
+
+```
+  struct  = product type  (A AND B)        enum = sum type  (A OR B)
+ ┌──────────────────────┐                 ┌──────────────────────┐
+ │ name: String         │                 │ Circle { radius }    │ ← exactly ONE
+ │ AND age: u32         │                 │ OR Rect { w, h }     │   of these at
+ │ AND active: bool     │                 │ OR Triangle(a, b, c) │   any moment
+ └──────────────────────┘                 └──────────────────────┘
+  has ALL fields at once                   is ONE variant at a time
+```
+
+The names "product" and "sum" come from counting the possible values:
+
+```
+  struct P { a: bool, b: u8 }   →  2 × 256 = 512 possible values
+  enum   S { A(bool), B(u8) }   →  2 + 256 = 258 possible values
+```
+
+---
+
+## 2. From simple to rich enums
+
+**C-like enum.** This is the version you already know from C#, Dart, and Python:
+
+```rust
+enum Direction { North, East, South, West }
+
+let d = Direction::North;      // variants are namespaced with ::
+```
+
+You can give variants explicit integer values and cast them:
+
+```rust
+enum HttpStatus { Ok = 200, NotFound = 404 }
+let code = HttpStatus::NotFound as u16;  // 404
+```
+
+**Enums with data.** This is where Rust differs. Each variant can have its own shape, using the same three forms as structs:
+
+```rust
+enum Message {
+    Quit,                        // unit variant: no data
+    Move { x: i32, y: i32 },     // struct-like variant: named fields
+    Write(String),               // tuple variant: one field
+    ChangeColor(u8, u8, u8),     // tuple variant: three fields
+}
+```
+
+One type, `Message`, now covers four completely different shapes of data. In C# you would usually need an interface plus four classes to get the same thing.
+
+---
+
+## 3. `match`: taking an enum apart
+
+To use the data inside an enum, you **pattern match**. A `match` must be **exhaustive**, meaning it has to handle every variant:
+
+```rust
+fn handle(msg: Message) {
+    match msg {
+        Message::Quit                 => println!("quit"),
+        Message::Move { x, y }        => println!("move to ({x}, {y})"),
+        Message::Write(text)          => println!("text: {text}"),
+        Message::ChangeColor(r, g, b) => println!("rgb({r}, {g}, {b})"),
+    }
+}
+```
+
+If you add a fifth variant later, **every `match` that doesn't handle it becomes a compile error**. The compiler shows you every place you need to update. That's a big help when refactoring.
+
+Useful pattern tools:
+
+```rust
+match msg {
+    Message::Move { x, .. } if x < 0 => println!("moving left"), // guard + ignore rest
+    Message::Write(ref s) if s.is_empty() => println!("empty"),
+    _ => println!("something else"),                            // wildcard catch-all
+}
+```
+
+Use `_` with care. It turns off the "you forgot a variant" check for that `match`.
+
+`match` is also an **expression**, so it returns a value:
+
+```rust
+let label = match d {
+    Direction::North | Direction::South => "vertical",   // `|` = OR pattern
+    Direction::East  | Direction::West  => "horizontal",
+};
+```
+
+---
+
+## 4. `Option<T>`: how Rust avoids null
+
+Rust has **no null**. A value that might be missing is written as an ordinary enum from the standard library:
+
+```rust
+enum Option<T> {
+    None,
+    Some(T),
+}
+```
+
+```
+  C# / Dart / Python                   Rust
+  ─────────────────────────            ───────────────────────────────
+  string? name = null;                 let name: Option<String> = None;
+  name.Length  → runtime crash ☠️      name.len()   → compile error ✋
+                                       You must handle None first.
+```
+
+For example:
+
+```rust
+fn find_index(v: &[i32], target: i32) -> Option<usize> {
+    v.iter().position(|&x| x == target)
+}
+
+match find_index(&[10, 20, 30], 20) {
+    Some(i) => println!("found at {i}"),
+    None    => println!("not found"),
+}
+```
+
+The type `Option<usize>` is different from `usize`. You **cannot** use it as a number by accident.
+
+---
+
+## 5. `Result<T, E>`: errors as values
+
+Rust has no exceptions for recoverable errors. A function that can fail returns another enum:
+
+```rust
+enum Result<T, E> {
+    Ok(T),     // success, carrying the value
+    Err(E),    // failure, carrying the error
+}
+```
+
+```rust
+fn parse_age(s: &str) -> Result<u32, String> {
+    s.trim().parse::<u32>().map_err(|e| format!("bad age '{s}': {e}"))
+}
+```
+
+The `?` operator handles the common pattern "if this is an error, return it to my caller":
+
+```rust
+fn total_age(a: &str, b: &str) -> Result<u32, String> {
+    let x = parse_age(a)?;   // on Err → return early; on Ok → unwrap the value
+    let y = parse_age(b)?;
+    Ok(x + y)
+}
+```
+
+```
+  parse_age(a)?
+      │
+      ├── Ok(v)  ──► v is assigned to x, execution continues
+      │
+      └── Err(e) ──► return Err(e) from total_age immediately
+```
+
+Compared with exceptions, the possibility of failure is **visible in the function signature**, and the compiler makes sure you deal with it.
+
+---
+
+## 6. Shorter tools when `match` is too much
+
+```rust
+// if let: you only care about one variant
+if let Some(i) = find_index(&v, 20) {
+    println!("found at {i}");
+}
+
+// let-else: unwrap the value, or leave early
+let Some(i) = find_index(&v, 20) else {
+    return;                     // the else branch must diverge (return, break, panic)
+};
+
+// matches!: a bool check
+let is_quit = matches!(msg, Message::Quit);
+```
+
+`Option` and `Result` also have many helper methods. These will feel familiar if you know R's functional style or JS method chaining:
+
+```rust
+let n = find_index(&v, 20).map(|i| i * 2).unwrap_or(0);
+let age = parse_age("42").unwrap_or_default();
+```
+
+Avoid `.unwrap()` in production code. It **panics** (crashes) on `None` or `Err`. It's fine in quick prototypes and tests.
+
+---
+
+## 7. Enums can have methods too
+
+Enums get `impl` blocks just like structs:
+
+```rust
+enum Shape {
+    Circle { radius: f64 },
+    Rect { w: f64, h: f64 },
+}
+
+impl Shape {
+    fn area(&self) -> f64 {
+        match self {
+            Shape::Circle { radius } => std::f64::consts::PI * radius * radius,
+            Shape::Rect { w, h }     => w * h,
+        }
+    }
+}
+```
+
+Inside `match self`, where `self` is `&Shape`, the bindings `radius`, `w`, and `h` are automatically **references** (`&f64`). This is called *match ergonomics*.
+
+---
+
+## 8. Making invalid states unrepresentable
+
+This is the main design payoff, and it fits your interest in architecture. Compare these two ways to model a network connection:
+
+```rust
+// ❌ Struct with optional fields: the type allows nonsense
+struct Connection {
+    is_connected: bool,
+    session_id: Option<String>,  // can it be Some while is_connected == false?
+    retry_count: Option<u32>,    // the type doesn't stop it
+}
+```
+
+```rust
+// ✅ Enum: each state carries exactly the data it needs
+enum Connection {
+    Disconnected,
+    Connecting { attempt: u32 },
+    Connected  { session_id: String },
+}
+```
+
+```
+         connect()                 success
+ ┌──────────────┐ ───────► ┌──────────────────┐ ───────► ┌───────────────────────┐
+ │ Disconnected │          │ Connecting       │          │ Connected             │
+ │   (no data)  │ ◄─────── │ { attempt: u32 } │          │ { session_id: String }│
+ └──────────────┘  give up └──────────────────┘          └───────────────────────┘
+        ▲                                                           │
+        └────────────────────────── disconnect() ───────────────────┘
+```
+
+With the enum, "connected but without a session id" **cannot be written down**. The compiler enforces your business rules, so you need fewer runtime checks and fewer tests.
+
+---
+
+## 9. Memory layout
+
+An enum value stores a **tag** (which variant it is) plus enough space for its **largest** variant:
+
+```
+  enum Shape { Circle { radius: f64 }, Rect { w: f64, h: f64 } }
+
+  ┌───────┬────────────────────────────────┐
+  │  tag  │  payload (sized for the        │
+  │ 0 / 1 │  largest variant: Rect, 16 B)  │
+  └───────┴────────────────────────────────┘
+   Circle uses only the first 8 bytes of the payload; the rest goes unused.
+```
+
+The compiler also uses **niche optimization**. When the payload has bit patterns that can never occur, it stores the tag in them for free. For example, `Option<&T>` and `Option<Box<T>>` are guaranteed to be the **same size** as `&T`, because a reference can never be null. Rust's "null-free" option therefore costs nothing at runtime.
+
+If a variant is much larger than the others, every value pays for it. A common fix is to box the large data: `Big(Box<LargeStruct>)`.
+
+---
+
+## Comparison with languages you know
+
+```
+┌──────────────────────┬─────────────────────────────────────────────────────┐
+│ Language             │ Closest equivalent to a Rust enum                   │
+├──────────────────────┼─────────────────────────────────────────────────────┤
+│ C#                   │ `enum` = ints only; data needs abstract record +    │
+│                      │ subclasses + switch expression (not exhaustive)     │
+│ Dart 3               │ `sealed class` + subclasses + exhaustive `switch`   │
+│                      │ → very close in spirit                              │
+│ Python               │ `Enum` = constants only; dataclasses + `match`      │
+│                      │ (3.10+) approximate it, with no exhaustiveness check│
+│ TypeScript           │ discriminated unions: { kind: "circle", ... } | ... │
+│ R                    │ factors = constants only                            │
+└──────────────────────┴─────────────────────────────────────────────────────┘
+```
+
+---
+
+### Key takeaways
+
+1. A **struct** means "all of these" (AND), and an **enum** means "exactly one of these" (OR).
+2. Variants can carry data, each with its own shape.
+3. `match` is **exhaustive**, so the compiler tracks every place a new variant must be handled.
+4. `Option<T>` replaces null, and `Result<T, E>` replaces exceptions for recoverable errors. Both are plain enums.
+5. Model states as enums so that invalid combinations can't be represented.

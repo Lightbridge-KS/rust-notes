@@ -19,6 +19,8 @@ book:
           href: "contents/datatypes/overview-datatypes.qmd"
         - text: Structs
           href: "contents/datatypes/structs.qmd"
+        - text: Enums
+          href: "contents/datatypes/enums.qmd"
     - part: Concept
       chapters: 
        - text: Ownership
