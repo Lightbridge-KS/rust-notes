@@ -1,0 +1,315 @@
+---
+title: "Static vs Dynamic Dispatch in Rust"
+---
+
+**Dispatch** means deciding *which function body runs* when you call a trait method. When you write `shape.area()`, something has to decide whether that means `Circle::area` or `Rect::area`. Static and dynamic dispatch differ in **when** that decision is made:
+
+```
+                        shape.area()
+                             │
+              ┌──────────────┴──────────────┐
+              ▼                             ▼
+     STATIC DISPATCH                 DYNAMIC DISPATCH
+     decided at COMPILE time         decided at RUN time
+     "the compiler already knows     "look up the right function
+      it's a Circle"                  in a table while running"
+     generics, impl Trait            dyn Trait
+```
+
+---
+
+## 1. Static dispatch in depth: monomorphization
+
+When you write a generic function, the compiler does **not** produce one function that "handles any T". It produces a **separate specialized copy for each concrete type you actually use**.
+
+```rust
+fn total_area<T: Shape>(items: &[T]) -> f64 {
+    items.iter().map(|s| s.area()).sum()
+}
+
+let circles = vec![Circle { radius: 1.0 }, Circle { radius: 2.0 }];
+let rects   = vec![Rect { w: 2.0, h: 3.0 }];
+total_area(&circles);
+total_area(&rects);
+```
+
+Conceptually, the compiler generates this:
+
+```
+  Your source (1 function)              Compiled binary (2 functions)
+ ┌───────────────────────────┐         ┌────────────────────────────────────┐
+ │ fn total_area<T: Shape>   │         │ fn total_area::<Circle>(&[Circle]) │
+ │   (items: &[T]) -> f64    │  ────►  │   → calls Circle::area directly    │
+ │                           │         ├────────────────────────────────────┤
+ │                           │         │ fn total_area::<Rect>(&[Rect])     │
+ │                           │         │   → calls Rect::area directly      │
+ └───────────────────────────┘         └────────────────────────────────────┘
+          "mono" + "morph" = turning many-shaped code into single-shaped copies
+```
+
+### Why this is fast: inlining
+
+Each copy knows the exact type, so the compiler can **paste the body of `area()` straight into the loop** (this is *inlining*). Inlining then makes further optimizations possible:
+
+```
+  After monomorphization:           After inlining + optimization:
+  for r in items {                  for r in items {
+      sum += Rect::area(r);   ──►       sum += r.w * r.h;     ← no call at all
+  }                                 }                         ← may even use SIMD
+```
+
+This is what Rust means by **zero-cost abstraction**: the generic code compiles to the same machine code you would get by writing it by hand for each type.
+
+### The costs of static dispatch
+
+```
+  N concrete types × M generic functions = up to N × M compiled copies
+  ─────────────────────────────────────────────────────────────────────
+  ⚠️ Larger binary ("code bloat")
+  ⚠️ Longer compile times (each copy is optimized separately)
+  ⚠️ A single Vec<T> can hold only ONE concrete type
+```
+
+**A trick for reducing bloat:** keep the generic part thin and put the heavy logic in a non-generic inner function. The standard library uses this pattern:
+
+```rust
+use std::{io, path::Path};
+
+pub fn load<P: AsRef<Path>>(path: P) -> io::Result<String> {
+    fn inner(path: &Path) -> io::Result<String> {
+        // large body, compiled ONCE
+        std::fs::read_to_string(path)
+    }
+    inner(path.as_ref())   // only this tiny shim is duplicated per P
+}
+```
+
+Callers can pass `&str`, `String`, or `PathBuf`. Each gets its own small shim, while the heavy body exists only once.
+
+---
+
+## 2. Dynamic dispatch in depth: fat pointers and vtables
+
+### Fat pointers
+
+A normal reference is one machine word. A trait object reference is **two words**:
+
+```rust
+use std::mem::size_of;
+
+size_of::<&Circle>()          // 8 bytes  → just a data pointer
+size_of::<&dyn Shape>()       // 16 bytes → data pointer + vtable pointer
+size_of::<Box<dyn Shape>>()   // 16 bytes → same, but owning
+```
+
+(Sizes shown are for 64-bit targets such as your M3.)
+
+### Inside the vtable
+
+The compiler builds **one vtable per (concrete type, trait) pair**, stored as static read-only data in your binary:
+
+```
+   &dyn Shape (16 bytes)
+  ┌───────────────┬───────────────┐
+  │ data ptr      │ vtable ptr    │
+  └──────┬────────┴───────┬───────┘
+         │                │
+         ▼                ▼
+  ┌──────────────┐   ┌─────────────────────────────────┐
+  │ Circle       │   │ VTABLE <Circle as Shape>        │
+  │ radius: 1.0  │   ├─────────────────────────────────┤
+  └──────────────┘   │ [0] drop_in_place::<Circle>     │ ← destructor
+                     │ [1] size  = 8                   │ ← needed to free memory
+                     │ [2] align = 8                   │
+                     │ [3] Circle::area                │ ← trait methods
+                     │ [4] Circle::name                │
+                     └─────────────────────────────────┘
+```
+
+(The exact vtable layout is an internal compiler detail, but in practice it looks like this.)
+
+### What a `dyn` call actually does
+
+```
+  s.area()   where s: &dyn Shape
+
+  Step 1: read vtable ptr from s                    (memory load)
+  Step 2: read function ptr at slot [3] of vtable   (memory load)
+  Step 3: call that function, passing data ptr      (indirect call)
+          as `self`
+```
+
+The extra loads are cheap. The **real cost is what the compiler can't do**: it doesn't know which function will run, so it **cannot inline** it. All the follow-on optimizations shown earlier (constant folding, SIMD) are lost.
+
+### Trait objects don't require the heap
+
+A common misunderstanding is that `dyn` means `Box`. In fact `dyn Trait` works behind **any** pointer:
+
+```rust
+fn print_it(s: &dyn Shape) { println!("{}", s.area()); }
+
+let c = Circle { radius: 1.0 };   // on the stack
+print_it(&c);                     // &Circle is coerced to &dyn Shape: no heap involved
+```
+
+```
+  &dyn Trait          borrowed, no allocation
+  &mut dyn Trait      borrowed mutably
+  Box<dyn Trait>      owned, heap
+  Rc<dyn Trait>       shared ownership (single thread)
+  Arc<dyn Trait + Send + Sync>   shared across threads
+```
+
+You need `Box` only when you must **own** values of different types, for example in `Vec<Box<dyn Shape>>`.
+
+### Memory layout matters too
+
+```
+  Vec<Rect>  (static: contiguous, cache-friendly)
+  ┌──────┬──────┬──────┬──────┐
+  │ Rect │ Rect │ Rect │ Rect │   ← CPU prefetcher loves this
+  └──────┴──────┴──────┴──────┘
+
+  Vec<Box<dyn Shape>>  (dynamic: pointers to scattered heap objects)
+  ┌──────┬──────┬──────┬──────┐
+  │ ptr  │ ptr  │ ptr  │ ptr  │
+  └──┬───┴──┬───┴──┬───┴──┬───┘
+     ▼      ▼      ▼      ▼
+   [Rect] [Circle] [Rect] [Circle]  ← scattered → possible cache misses
+```
+
+In hot loops over large collections, this "pointer chasing" can cost more than the indirect call.
+
+---
+
+## 3. Dyn compatibility: why some traits can't be `dyn`
+
+A vtable is a **fixed-size table of concrete function pointers**. Any trait method that would need a type the vtable can't know in advance breaks this:
+
+```rust
+trait Shape {
+    fn area(&self) -> f64;                  // ✅ fine
+    fn duplicate(&self) -> Self;            // ❌ Self's size is unknown behind dyn
+    fn visit<V: Visitor>(&self, v: V);      // ❌ would need one entry per V: infinite
+}
+```
+
+```
+  Rule of thumb, for dyn compatibility:
+  ✅ methods take &self / &mut self / Box<Self>
+  ❌ methods return Self
+  ❌ methods have their own generic type parameters
+  ❌ the trait requires `Self: Sized`
+```
+
+**The escape hatch:** mark a problem method with `where Self: Sized`. It is then left out of the vtable, so the trait stays dyn-compatible:
+
+```rust
+trait Shape {
+    fn area(&self) -> f64;
+    fn duplicate(&self) -> Self where Self: Sized;  // not callable via dyn, but OK
+}
+```
+
+This is also why `Clone` is not dyn-compatible: `clone()` returns `Self`. When you need cloneable trait objects, the usual pattern is a method like `fn box_clone(&self) -> Box<dyn Shape>`, or the `dyn-clone` crate.
+
+---
+
+## 4. Accepting both: the `?Sized` bound
+
+By default, every generic `T` carries an invisible `T: Sized` bound. `dyn Shape` has no size known at compile time, so it is excluded. To accept both concrete types and trait objects, relax the bound:
+
+```rust
+fn print_area<T: Shape + ?Sized>(s: &T) {   // "T may or may not be Sized"
+    println!("{}", s.area());
+}
+
+print_area(&Circle { radius: 1.0 });        // T = Circle      → static
+let d: &dyn Shape = &Rect { w: 2.0, h: 3.0 };
+print_area(d);                              // T = dyn Shape   → dynamic
+```
+
+---
+
+## 5. The third option: enum dispatch
+
+Building on the enums lesson, there's a middle ground: **static dispatch with mixed types**, as long as the set of types is closed.
+
+```rust
+enum AnyShape { Circle(Circle), Rect(Rect) }
+
+impl AnyShape {
+    fn area(&self) -> f64 {
+        match self {                        // a branch on the tag, not a vtable lookup
+            AnyShape::Circle(c) => c.area(),  // can be inlined ✅
+            AnyShape::Rect(r)   => r.area(),  // can be inlined ✅
+        }
+    }
+}
+
+let shapes: Vec<AnyShape> = vec![/* mixed, contiguous, no Box */];
+```
+
+```
+┌─────────────────────┬──────────────┬──────────────┬──────────────────┐
+│                     │ Generics     │ Enum         │ dyn Trait        │
+├─────────────────────┼──────────────┼──────────────┼──────────────────┤
+│ Decided             │ compile time │ runtime      │ runtime (vtable) │
+│                     │              │ (match/tag)  │                  │
+│ Inlining            │ ✅           │ ✅           │ ❌               │
+│ Mixed types in Vec  │ ❌           │ ✅           │ ✅               │
+│ Heap needed for Vec │ ❌           │ ❌           │ ✅ (Box)         │
+│ Open to new types   │ ✅           │ ❌ closed    │ ✅               │
+│ Binary size         │ grows        │ small        │ small            │
+└─────────────────────┴──────────────┴──────────────┴──────────────────┘
+```
+
+---
+
+## 6. How this compares to languages you know
+
+```
+  C#       Interface and virtual calls → dynamic (vtable), like dyn.
+           Generics with VALUE types (struct, int) → the JIT specializes them
+           (similar to monomorphization). Generics with REFERENCE types → one
+           shared copy, effectively dynamic.
+  Dart     Effectively always dynamic dispatch (virtual methods).
+  Python   Always dynamic, by attribute lookup at runtime (even slower than vtables).
+  Rust     STATIC by default; dynamic only when you write `dyn`.
+           The cost is always visible in the code.
+```
+
+In C#, Dart, and Python, dynamic dispatch is the default and is usually invisible. Rust **makes you opt in**, and the `dyn` keyword marks every place you pay for it.
+
+---
+
+## 7. Decision guide
+
+```
+  Need values of different types together in one collection / at one call site?
+  │
+  ├── NO ──► Generics / impl Trait (static)          ← the default choice
+  │
+  └── YES ─► Is the set of types closed and known to you?
+             │
+             ├── YES ──► enum dispatch               ← fast, no heap
+             │
+             └── NO ───► dyn Trait                    ← plugins, extension points,
+                         (also good when the binary     callbacks, middleware
+                          size or compile time from
+                          generics gets out of hand)
+```
+
+**In practice**, the performance difference is often negligible outside hot loops. A `dyn` call costs a few nanoseconds. Choose for **design clarity** first, and if speed matters, **measure** with a benchmarking crate such as `criterion` instead of guessing. A common real-world split is to use generics in tight numeric or data-processing kernels, and `dyn Trait` at architectural boundaries such as plugin registries, strategy objects, and `Box<dyn Error>`.
+
+---
+
+### Key takeaways
+1. **Static dispatch** uses monomorphization: one specialized copy per type, inlined and fully optimized. The price is binary size and compile time.
+2. **Dynamic dispatch** uses a fat pointer (data + vtable) and an indirect call. The main cost is **lost inlining**, not the lookup itself.
+3. `dyn` does **not** require the heap. `&dyn Trait` works on stack values.
+4. A trait is dyn-compatible only if its methods can fit in a fixed vtable (no returning `Self`, no generic methods). `where Self: Sized` is the escape hatch.
+5. **Enum dispatch** gives mixed types with static speed when the set of types is closed.
+6. Rust is static by default and makes every dynamic cost explicit with `dyn`.
+
+A good follow-up is **generics and lifetimes in depth**, since `Box<dyn Trait>` quietly carries a lifetime (`Box<dyn Trait + 'static>`). Another is **closures**, where `impl Fn` versus `Box<dyn Fn>` is the same static-vs-dynamic choice in everyday code.

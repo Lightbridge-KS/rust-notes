@@ -39,6 +39,8 @@ book:
          href: "contents/concept/onewriter-xor-manyreader.qmd"
        - text: Coercion
          href: "contents/concept/coercion.qmd"
+       - text: Static vs Dyn dispatch
+         href: "contents/concept/static-vs-dyn-dispatch.qmd"
     - part: Tooling
       chapters: 
         - text: Cargo Commands
