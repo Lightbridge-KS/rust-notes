@@ -29,6 +29,10 @@ book:
           href: "contents/datatypes/option.qmd"
         - text: Smart Pointers
           href: "contents/datatypes/smart-pointers.qmd"
+    - part: Control
+      chapters: 
+        - text: Control Flow
+          href: "contents/control/control-flow.qmd"
     - part: Function
       chapters: 
         - text: Fn Basic

@@ -1,0 +1,296 @@
+---
+title: "Control Flow in Rust"
+---
+
+Rust's control flow looks familiar if you know C#, Dart, or Python, but one design decision changes how you use it: **almost everything is an expression**. `if`, `match`, `loop`, and even plain `{ }` blocks produce values. Most of the other differences follow from that.
+
+## 0. The core idea: expressions and the semicolon rule
+
+```
+ Statement-oriented (C#/Java style)     Expression-oriented (Rust)
+ ──────────────────────────────────     ─────────────────────────────────
+ int x;                                 let x = if ok { 1 } else { 2 };
+ if (ok) { x = 1; } else { x = 2; }             └──── yields a value ────┘
+```
+
+A block evaluates to its **last expression**, as long as that expression has **no trailing semicolon**:
+
+```rust
+let a = { let t = 2; t * 10 };   // a = 20
+let b = { let t = 2; t * 10; };  // b = ()  ← the semicolon turned it into a statement
+```
+
+```
+ { stmt; stmt; expr }   →  value of expr
+ { stmt; stmt; expr; }  →  ()   ("unit", Rust's "nothing" value)
+```
+
+This is also how functions return values without writing `return`.
+
+---
+
+## 1. `if` / `else if` / `else`
+
+```rust
+let temp = 38.2;
+
+if temp >= 39.0 {
+    println!("high fever");
+} else if temp >= 37.5 {
+    println!("fever");
+} else {
+    println!("normal");
+}
+```
+
+There are three differences from what you may be used to. First, there are **no parentheses** around the condition, but **braces are mandatory**, even for one line. Second, the condition **must be a `bool`**. Rust has no truthiness, so `if 1 { }`, `if some_vec { }`, and `if some_string { }` are compile errors. Python, JS, and R all allow these, so this one tends to catch people. You write `if !v.is_empty()` instead. Third, `if` is an expression, so it replaces the ternary operator:
+
+```rust
+let label = if temp >= 37.5 { "fever" } else { "normal" };
+```
+
+Both arms must have **the same type**. `if x { 5 } else { "five" }` is a compile error.
+
+---
+
+## 2. Loops: `loop`, `while`, `for`
+
+```
+ loop   ──► repeat forever until `break` (can return a value)
+ while  ──► repeat while a bool condition is true
+ for    ──► iterate over anything that implements IntoIterator
+```
+
+### `loop`: an infinite loop that can return a value
+
+```rust
+let mut attempts = 0;
+
+let result = loop {
+    attempts += 1;
+    if attempts == 3 {
+        break attempts * 10;   // `break` carries a value out of the loop
+    }
+};
+// result == 30
+```
+
+This works well for retry logic: keep trying, and break out with the successful value.
+
+### `while`
+
+```rust
+let mut n = 3;
+while n > 0 {
+    println!("{n}...");
+    n -= 1;
+}
+println!("liftoff!");
+```
+
+### `for`: the one you'll use most
+
+```rust
+for i in 0..5    { }   // 0,1,2,3,4      (exclusive end)
+for i in 0..=5   { }   // 0,1,2,3,4,5    (inclusive end)
+for i in (0..5).rev() { }   // 4,3,2,1,0
+
+let names = vec!["Ann", "Bo", "Cy"];
+for (i, name) in names.iter().enumerate() {
+    println!("{i}: {name}");
+}
+```
+
+Rust has no C-style `for (i = 0; i < n; i++)`. Writing `for i in 0..v.len() { v[i] }` is legal but not idiomatic. The usual approach is to iterate the collection directly, which avoids bounds checks and off-by-one bugs.
+
+**The ownership twist.** How you write the `for` decides what happens to the collection:
+
+```
+ for x in v         x: T        v is MOVED (consumed), unusable afterwards
+ for x in &v        x: &T       borrow, read-only     (same as v.iter())
+ for x in &mut v    x: &mut T   borrow, can modify    (same as v.iter_mut())
+```
+
+```rust
+let mut scores = vec![1, 2, 3];
+for s in &mut scores { *s *= 10; }   // scores = [10, 20, 30]
+for s in &scores { println!("{s}"); }
+for s in scores { /* takes ownership */ }
+// println!("{:?}", scores);  ❌ error: value moved
+```
+
+### Loop labels for nested loops
+
+```rust
+'outer: for i in 0..5 {
+    for j in 0..5 {
+        if i * j == 6 {
+            println!("found {i} x {j}");
+            break 'outer;          // exits BOTH loops
+        }
+    }
+}
+```
+
+The leading apostrophe marks a label. These are not lifetimes, even though they share the syntax.
+
+---
+
+## 3. `match`: Rust's most important control-flow tool
+
+`match` is like `switch`, but it compares against **patterns**, and the compiler requires it to be **exhaustive**. If you forget a case, the code won't compile.
+
+```rust
+fn describe(n: i32) -> &'static str {
+    match n {
+        0               => "zero",
+        1 | 2 | 3       => "small",          // OR-pattern
+        4..=9           => "medium",         // range pattern
+        x if x < 0      => "negative",       // match guard
+        _               => "large",          // wildcard: "everything else"
+    }
+}
+```
+
+```
+ value ──► arm 1? ──no──► arm 2? ──no──► ... ──► _ (catch-all)
+              │yes           │yes
+              ▼              ▼
+           result         result        ← first matching arm wins (top to bottom)
+```
+
+### Destructuring enums
+
+This is where `match` earns its place:
+
+```rust
+enum Shape {
+    Circle { r: f64 },
+    Rect { w: f64, h: f64 },
+    Point,
+}
+
+fn area(s: &Shape) -> f64 {
+    match s {
+        Shape::Circle { r }  => std::f64::consts::PI * r * r,
+        Shape::Rect { w, h } => w * h,
+        Shape::Point         => 0.0,
+    }
+}
+```
+
+If you later add `Shape::Triangle` to the enum, every `match` that doesn't handle it becomes a compile error (`E0004: non-exhaustive patterns`). The compiler gives you a list of places to update. C#'s switch expressions and Dart 3's sealed classes offer something similar, but in Rust it is enforced everywhere by default.
+
+### Matching on tuples
+
+```rust
+match (is_urgent, is_complete) {
+    (true, false) => "do it now",
+    (_, true)     => "done",
+    (false, false)=> "later",
+}
+```
+
+---
+
+## 4. Shorthand for one pattern: `if let`, `let else`, `while let`
+
+A full `match` is verbose when you only care about one case. That situation comes up all the time with `Option` and `Result`.
+
+```rust
+let maybe_id: Option<u32> = Some(42);
+
+// Full match
+match maybe_id {
+    Some(id) => println!("id = {id}"),
+    None => {}
+}
+
+// if let: "if it matches this pattern, bind and run"
+if let Some(id) = maybe_id {
+    println!("id = {id}");
+} else {
+    println!("no id");
+}
+```
+
+**`let else`** is for the "unwrap or bail out" guard pattern, and it keeps the happy path unindented:
+
+```rust
+fn parse_port(s: &str) -> u16 {
+    let Ok(port) = s.parse::<u16>() else {
+        return 8080;          // else-block MUST diverge (return/break/continue/panic)
+    };
+    port                      // `port` is in scope here, already unwrapped
+}
+```
+
+**`while let`** loops for as long as the pattern keeps matching:
+
+```rust
+let mut stack = vec![1, 2, 3];
+while let Some(top) = stack.pop() {
+    println!("{top}");        // 3, 2, 1 — stops when pop() returns None
+}
+```
+
+In the **Rust 2024 edition** you can also chain conditions with `&&`: `if let Some(x) = opt && x > 5 { ... }`.
+
+---
+
+## 5. Early exit with `?`
+
+`?` is control flow too. On `Err` or `None`, it **returns early** from the current function. On success, it unwraps the value.
+
+```rust
+fn double_input(s: &str) -> Result<i32, std::num::ParseIntError> {
+    let n = s.trim().parse::<i32>()?;   // Err → return Err(...) immediately
+    Ok(n * 2)
+}
+```
+
+```
+ s.parse()?
+     │
+     ├── Ok(v)  ──► v continues down the function
+     └── Err(e) ──► return Err(e) from the function right now
+```
+
+You'll see this constantly. It's how Rust gets exception-like ergonomics without having exceptions.
+
+---
+
+## 6. A bonus insight: the "never" type `!`
+
+How can this type-check, when one arm is an `i32` and the other is a `return`?
+
+```rust
+let n: i32 = match maybe_n {
+    Some(v) => v,
+    None => return,     // ← what type is this?
+};
+```
+
+`return`, `break`, `continue`, and `panic!()` have the type `!` ("never"), because they never produce a value. The compiler knows `!` can stand in for any type, so the arms agree. The same rule is why the `else` block in `let else` must diverge.
+
+---
+
+## Cheat sheet: which construct to use?
+
+```
+ Need to BRANCH?
+  ├─ on a bool ............................ if / else
+  ├─ on the shape/variant of a value ...... match
+  │    └─ only care about one pattern ..... if let  /  let ... else
+ Need to REPEAT?
+  ├─ over a collection or range ........... for
+  ├─ while a condition holds .............. while
+  ├─ while a pattern keeps matching ....... while let
+  └─ forever / retry + return a value ..... loop  (break value)
+ Need to BAIL OUT early?
+  └─ on Err / None ........................ ?
+```
+
+## Common beginner gotchas
+
+The most frequent surprise is a **stray semicolon** on the last line of a block or function. It turns your value into `()`, and you get a "mismatched types: expected `i32`, found `()`" error. The second is **mismatched arm types** in `if` or `match` used as expressions. The third is expecting **truthiness**: always compare explicitly, as in `!v.is_empty()` or `x != 0`. The last is **moving a collection with `for x in v`** when you meant to borrow with `&v`.
