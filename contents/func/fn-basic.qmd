@@ -1,0 +1,102 @@
+---
+title: "Rust Function"
+---
+
+Rust functions are explicit about types and use expressions for return values. Generic functions let one function work across many types, but you must declare which capabilities (traits) the type needs.
+
+## 1. Function basics
+
+```rust
+fn add(a: i32, b: i32) -> i32 {
+    a + b      // no semicolon = this is the return value
+}
+
+fn greet(name: &str) {          // no "->" = returns () (unit)
+    println!("Hello, {name}!");
+}
+```
+
+Things that differ from Python, R, and C#:
+
+- **Parameter types are mandatory.** Rust never infers them in a signature, though it does infer types inside the body.
+- **The last expression is the return value.** If you add a `;`, it becomes a statement that returns `()`, and you get a type error. Use `return` only for early exits.
+- **How you pass a value matters because of ownership:**
+
+```
+fn take(s: String)       → moves ownership in (caller can't use s after)
+fn borrow(s: &String)    → read-only borrow
+fn modify(s: &mut String)→ mutable borrow
+```
+
+## 2. Generic functions
+
+Here is a function that finds the largest item in a slice of any type:
+
+```rust
+fn largest<T: PartialOrd>(items: &[T]) -> &T {
+    let mut max = &items[0];
+    for item in items {
+        if item > max { max = item; }
+    }
+    max
+}
+
+largest(&[3, 7, 2]);        // T = i32
+largest(&[1.5, 0.2]);       // T = f64
+largest(&['a', 'z']);       // T = char
+```
+
+The key part is `T: PartialOrd`, which is a **trait bound**. Without it, the compiler refuses to compile `item > max`, because it can't assume an arbitrary `T` supports comparison. This works like C#'s `where T : IComparable<T>`. It differs from Python and R, where duck typing would only fail at runtime.
+
+## 3. Three ways to write bounds
+
+```rust
+use std::fmt::{Debug, Display};
+
+// a) Inline bound
+fn show<T: Display>(x: T) { println!("{x}"); }
+
+// b) impl Trait: shorthand for simple cases
+fn show2(x: impl Display) { println!("{x}"); }
+
+// c) where clause: cleaner with many bounds
+fn show_pair<T, U>(a: T, b: U)
+where
+    T: Display + Clone,
+    U: Debug,
+{
+    println!("{a} and {b:?}");
+}
+```
+
+You can combine bounds with `+`. Use a `where` clause once the signature gets crowded.
+
+## 4. What happens at compile time: monomorphization
+
+```
+  Your code:        fn largest<T: PartialOrd>(&[T]) -> &T
+                                  │
+          compiler finds calls with i32 and f64
+                                  ▼
+  Generated:   largest_i32(&[i32]) -> &i32   ← specialized copy
+               largest_f64(&[f64]) -> &f64   ← specialized copy
+```
+
+Rust stamps out a concrete copy for each type you actually use. That makes generics **zero-cost at runtime**, as fast as hand-written versions, with the tradeoff of a larger binary and longer compile times. If you need runtime polymorphism instead, you'd use `dyn Trait`, which is closer to C# interfaces.
+
+## 5. Turbofish `::<>`
+
+When the compiler can't infer `T`, you tell it explicitly:
+
+```rust
+let n = "42".parse::<i32>().unwrap();
+```
+
+## Mental model compared to languages you know
+
+```
+              Type check      Bound syntax              Dispatch
+C#            compile time    where T : IComparable<T>  JIT-specialized
+Rust          compile time    T: PartialOrd             monomorphized
+Python / R    runtime (duck)  none                      dynamic
+```

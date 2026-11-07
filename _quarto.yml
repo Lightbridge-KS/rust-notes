@@ -27,6 +27,8 @@ book:
           href: "contents/datatypes/option.qmd"
     - part: Function
       chapters: 
+        - text: Fn Basic
+          href: "contents/func/fn-basic.qmd"
         - text: Closure
           href: "contents/func/closure.qmd"
     - part: Concept
