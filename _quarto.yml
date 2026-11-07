@@ -41,6 +41,10 @@ book:
           href: "contents/func/closure.qmd"
         - text: Macros
           href: "contents/func/macros.qmd"
+    - part: OOP-like
+      chapters: 
+        - text: Struct + Impl
+          href: "contents/oop/struct-impl.qmd"
     - part: Organization
       chapters: 
         - text: PKG-Crates-Module

@@ -1,0 +1,315 @@
+---
+title: "Imitating a Class in Rust: `struct` + `impl` (+ `trait`)"
+---
+
+Rust has no `class` keyword. The pieces of a class are split across separate language features:
+
+```
+          C# / Python "class"                         Rust
+ ┌──────────────────────────────┐        ┌───────────────────────────────┐
+ │  fields (data)               │  ───►  │  struct      { fields }       │
+ │  constructor                 │  ───►  │  impl  →  fn new() -> Self    │
+ │  methods                     │  ───►  │  impl  →  fn m(&self, ...)    │
+ │  static methods              │  ───►  │  impl  →  fn f(...) (no self) │
+ │  private / public            │  ───►  │  mod + pub (module-level)     │
+ │  interface / abstract class  │  ───►  │  trait                        │
+ │  inheritance                 │  ───►  │  ✗ none → composition + trait │
+ │  destructor / IDisposable    │  ───►  │  impl Drop                    │
+ └──────────────────────────────┘        └───────────────────────────────┘
+```
+
+Data and behavior are declared separately, then joined by `impl`.
+
+---
+
+## 1. A basic "class"
+
+Here is a familiar C# class:
+
+```csharp
+public class BankAccount {
+    private string owner;
+    private long balance;
+    public BankAccount(string owner) { this.owner = owner; balance = 0; }
+    public void Deposit(long amount) { balance += amount; }
+    public long Balance => balance;
+}
+```
+
+This is the Rust equivalent:
+
+```rust
+pub struct BankAccount {
+    owner: String,   // fields are private by default
+    balance: i64,
+}
+
+impl BankAccount {
+    /// "Constructor": just a regular associated function by convention named `new`
+    pub fn new(owner: &str) -> Self {
+        Self { owner: owner.to_string(), balance: 0 }
+    }
+
+    /// Getter: borrows self read-only
+    pub fn balance(&self) -> i64 {
+        self.balance
+    }
+
+    /// Mutating method: borrows self mutably
+    pub fn deposit(&mut self, amount: i64) {
+        self.balance += amount;
+    }
+}
+
+fn main() {
+    let mut acc = BankAccount::new("KS");   // `::` calls an associated fn
+    acc.deposit(100);                       // `.` calls a method
+    println!("{}", acc.balance());          // 100
+}
+```
+
+There are a few things to notice. `Self` is an alias for the type being implemented (`BankAccount`). `new` is not special to the compiler. It's only a convention, so you can have `new`, `with_owner`, `from_csv`, and so on, which works like named constructors. The variable must be declared `let mut` to call a `&mut self` method, because Rust makes mutability explicit at the binding site.
+
+---
+
+## 2. The three kinds of `self`
+
+This part has no direct equivalent in C# or Python. It's where Rust's ownership system enters OOP.
+
+```
+ Receiver     Meaning                     Caller still owns obj?   Can mutate?
+ ─────────    ─────────────────────────   ──────────────────────   ───────────
+ &self        borrow read-only            ✅ yes                    ❌
+ &mut self    borrow exclusively          ✅ yes                    ✅
+ self         take ownership (consume)    ❌ no — moved             ✅
+ (none)       associated fn ("static")    n/a                      n/a
+```
+
+A consuming method is useful for "finalizing" an object:
+
+```rust
+impl BankAccount {
+    /// Closes the account and returns the remaining money.
+    /// After this, the account no longer exists.
+    pub fn close(self) -> i64 {
+        self.balance
+    }
+}
+
+fn main() {
+    let mut acc = BankAccount::new("KS");
+    acc.deposit(50);
+    let cash = acc.close();
+    // acc.deposit(10);   // ❌ compile error: value moved in `close`
+}
+```
+
+The compiler enforces "you can't use a closed account". In C#, you would need a runtime `ObjectDisposedException` check for that.
+
+**Rule of thumb:** default to `&self`. Use `&mut self` only when you modify fields. Use `self` for transformations or builders that hand back a new value.
+
+---
+
+## 3. Encapsulation: privacy is per module, not per class
+
+In C#, `private` means "only this class can see it". In Rust, private means "only this module (and its children) can see it".
+
+```rust
+mod bank {
+    pub struct BankAccount {
+        pub owner: String,  // public field
+        balance: i64,       // private field
+    }
+
+    impl BankAccount {
+        pub fn new(owner: &str) -> Self {
+            Self { owner: owner.to_string(), balance: 0 }
+        }
+        pub fn balance(&self) -> i64 { self.balance }
+    }
+}
+
+fn main() {
+    let acc = bank::BankAccount::new("KS");
+    println!("{}", acc.owner);        // ✅ pub field
+    // println!("{}", acc.balance);   // ❌ private field
+    // let fake = bank::BankAccount { owner: "x".into(), balance: 999 };
+    //                                // ❌ can't build it: a field is private
+}
+```
+
+```
+ ┌──────────── mod bank ────────────┐
+ │  struct BankAccount              │   Everything inside `bank`
+ │     owner   (pub)  ──────────────┼──► visible outside
+ │     balance (private)            │   can see `balance`.
+ │  impl BankAccount { ... }        │
+ │  fn audit(a: &BankAccount) {     │   ← even this free function
+ │      a.balance  // ✅ allowed     │     can read it (same module)
+ │  }                               │
+ └──────────────────────────────────┘
+```
+
+Having one private field also means outsiders must use your constructor. That's how you enforce invariants, like "balance is never negative".
+
+---
+
+## 4. Error handling instead of exceptions
+
+Methods that can fail return a `Result` instead of throwing:
+
+```rust
+impl BankAccount {
+    pub fn withdraw(&mut self, amount: i64) -> Result<(), String> {
+        if amount > self.balance {
+            return Err(format!("Insufficient funds: have {}", self.balance));
+        }
+        self.balance -= amount;
+        Ok(())
+    }
+}
+
+// usage
+match acc.withdraw(500) {
+    Ok(()) => println!("done"),
+    Err(e) => println!("error: {e}"),
+}
+```
+
+---
+
+## 5. Interfaces and polymorphism: `trait`
+
+A `trait` is like a C# `interface`, and it can have default method bodies, like a base class's virtual method.
+
+```rust
+trait Shape {
+    fn area(&self) -> f64;                    // required (abstract)
+
+    fn describe(&self) -> String {            // default (like a virtual method)
+        format!("Shape with area {:.2}", self.area())
+    }
+}
+
+struct Circle { r: f64 }
+struct Rect   { w: f64, h: f64 }
+
+impl Shape for Circle {
+    fn area(&self) -> f64 { std::f64::consts::PI * self.r * self.r }
+}
+
+impl Shape for Rect {
+    fn area(&self) -> f64 { self.w * self.h }
+    fn describe(&self) -> String {            // "override"
+        format!("Rectangle {}x{}", self.w, self.h)
+    }
+}
+```
+
+There are two ways to use polymorphism:
+
+```rust
+// (A) Static dispatch — generics, resolved at compile time (zero cost)
+fn print_area(s: &impl Shape) {
+    println!("{}", s.area());
+}
+
+// (B) Dynamic dispatch — trait objects, vtable at runtime (like C# virtual)
+fn main() {
+    let shapes: Vec<Box<dyn Shape>> = vec![
+        Box::new(Circle { r: 1.0 }),
+        Box::new(Rect { w: 2.0, h: 3.0 }),
+    ];
+    for s in &shapes {
+        println!("{}", s.describe());
+    }
+}
+```
+
+```
+ Static (impl Shape / <T: Shape>)        Dynamic (dyn Shape)
+ ───────────────────────────────         ──────────────────────────
+ compiler copies fn per type             one fn, lookup via vtable
+ fastest, inlinable                      tiny runtime cost
+ one concrete type per call              mixed types in one Vec ✅
+```
+
+Use (B) whenever you need a heterogeneous list. That's the classic `List<IShape>` situation.
+
+---
+
+## 6. No inheritance → composition
+
+Rust deliberately has no `class Dog : Animal`. You compose structs and share behavior through traits. This is the "favor composition over inheritance" principle, enforced by the language.
+
+```rust
+struct Engine { hp: u32 }
+
+struct Car {
+    brand: String,
+    engine: Engine,          // HAS-A instead of IS-A
+}
+
+impl Car {
+    fn horsepower(&self) -> u32 {
+        self.engine.hp       // explicit delegation
+    }
+}
+```
+
+```
+ Inheritance (C#)              Composition + Trait (Rust)
+ ─────────────────             ───────────────────────────
+      Animal                    trait Speak { fn speak(&self); }
+        ▲                              ▲            ▲
+   ┌────┴────┐                    impl for Dog  impl for Cat
+  Dog       Cat                 (each struct independent;
+ (inherits fields + methods)     shared contract, no shared state)
+```
+
+---
+
+## 7. "Built-in" class features through standard traits
+
+Many things that C# gives every object come from standard traits you derive or implement:
+
+```rust
+use std::fmt;
+
+#[derive(Debug, Clone, PartialEq, Default)]   // auto-generated impls
+struct Point { x: i32, y: i32 }
+
+impl fmt::Display for Point {                 // ≈ override ToString()
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "({}, {})", self.x, self.y)
+    }
+}
+
+impl Drop for Point {                         // ≈ destructor / Dispose()
+    fn drop(&mut self) { println!("dropping {self}"); }
+}
+```
+
+| C# concept | Rust equivalent |
+|---|---|
+| `ToString()` override | `impl Display` |
+| debugger view | `#[derive(Debug)]` → `{:?}` |
+| `Equals` / `==` | `#[derive(PartialEq)]` |
+| parameterless ctor | `#[derive(Default)]` → `Point::default()` |
+| copy constructor / `MemberwiseClone` | `#[derive(Clone)]` → `.clone()` |
+| destructor / `IDisposable` | `impl Drop` (runs automatically and deterministically at scope end) |
+| `partial class` | multiple `impl` blocks for the same type |
+
+---
+
+## Mental model summary
+
+```
+   struct   = WHAT the object is      (state)
+   impl     = WHAT it can do          (behavior, bound to one type)
+   trait    = WHAT it promises        (contract, shared across types)
+   mod/pub  = WHO can see it          (encapsulation)
+   &self / &mut self / self = HOW it is accessed (ownership-aware OOP)
+```
+
+The biggest shift from C# or Python is that ownership is part of every method's signature. Once you read `&self`, `&mut self`, and `self` as "look", "modify", and "consume", Rust "classes" start feeling natural.
