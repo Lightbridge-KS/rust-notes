@@ -41,6 +41,10 @@ book:
           href: "contents/func/closure.qmd"
         - text: Macros
           href: "contents/func/macros.qmd"
+    - part: Organization
+      chapters: 
+        - text: PKG-Crates-Module
+          href: "contents/pkg/package-crates-modules.qmd"
     - part: Concept
       chapters: 
        - text: Ownership

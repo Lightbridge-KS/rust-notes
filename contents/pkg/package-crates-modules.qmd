@@ -1,0 +1,388 @@
+---
+title: "Organizing Rust Code: Packages, Crates, and Modules"
+---
+
+Rust has a layered system for organizing code, and each layer has its own job. Cargo (the build tool) handles the outer layers, and the compiler handles the inner ones.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ WORKSPACE (optional)    a group of packages that share a    │
+│                         Cargo.lock and target/ dir          │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │ PACKAGE             one Cargo.toml; what you publish  │  │
+│  │                     and version                       │  │
+│  │  ┌─────────────────────┐   ┌─────────────────────┐    │  │
+│  │  │ CRATE (library)     │   │ CRATE (binary)      │    │  │
+│  │  │ root: src/lib.rs    │   │ root: src/main.rs   │    │  │
+│  │  │  ┌───────────────┐  │   │  ┌───────────────┐  │    │  │
+│  │  │  │ MODULE tree   │  │   │  │ MODULE tree   │  │    │  │
+│  │  │  │  └ items: fn, │  │   │  │  └ items      │  │    │  │
+│  │  │  │    struct,    │  │   │  └───────────────┘  │    │  │
+│  │  │  │    enum, trait│  │   └─────────────────────┘    │  │
+│  │  │  └───────────────┘  │                              │  │
+│  │  └─────────────────────┘                              │  │
+│  └───────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+       Cargo's world  ◄──────────────►  Compiler's world
+     (workspace, package)             (crate, module, item)
+```
+
+Here is how these map to languages you already know:
+
+| Rust | C#/.NET | Python | R |
+|---|---|---|---|
+| Workspace | Solution (`.sln`) | monorepo of packages | — |
+| Package | Project (`.csproj`) | distribution (`pyproject.toml`) | package (`DESCRIPTION`) |
+| Crate | Assembly (`.dll` / `.exe`) | importable top-level package | the installed package |
+| Module | namespace (but tied to files) | module / subpackage | — (R has no nesting) |
+| `use` | `using` | `from x import y` | `pkg::fn` / `library()` |
+
+---
+
+## 1. Crate: the unit of compilation
+
+A **crate** is the smallest thing `rustc` compiles at once. Each crate starts from a **crate root** file, and the compiler builds the whole crate by following `mod` declarations out from that root.
+
+There are two kinds. A **binary crate** has a `fn main()` and compiles to an executable. A **library crate** has no `main`, compiles to something other crates can depend on, and is what people usually mean when they say "a crate" (as on crates.io).
+
+## 2. Package: what Cargo manages
+
+A **package** is a directory with a `Cargo.toml`. Its rules are simple. It may contain at most one library crate and any number of binary crates, and it must contain at least one crate.
+
+Cargo finds crate roots by convention, so you rarely configure them:
+
+```
+textkit/                      ← PACKAGE (name = "textkit")
+├── Cargo.toml
+├── Cargo.lock
+├── src/
+│   ├── lib.rs                ← library crate root  → crate `textkit`
+│   ├── main.rs               ← binary crate root   → executable `textkit`
+│   ├── parse.rs              ← module (only if declared!)
+│   ├── stats.rs              ← module
+│   ├── stats/
+│   │   └── words.rs          ← submodule stats::words
+│   ├── render.rs             ← module
+│   └── bin/
+│       └── bench_tool.rs     ← extra binary crate → executable `bench_tool`
+├── tests/
+│   └── integration.rs        ← each file = its own separate test crate
+└── examples/
+    └── demo.rs               ← run with `cargo run --example demo`
+```
+
+```toml
+# Cargo.toml
+[package]
+name = "textkit"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# other crates go here
+```
+
+One naming detail: if the package is named `text-kit`, the crate name in code becomes `text_kit`, because hyphens aren't valid in identifiers.
+
+## 3. Modules: the tree inside a crate
+
+This is where Rust differs most from Python, and it's the biggest stumbling block for newcomers.
+
+> **In Rust, a file is NOT part of your program just because it exists.**
+> A file only joins the crate when a `mod` declaration in its parent says so.
+
+Python treats the filesystem as the module tree. In Rust, you build the module tree yourself with `mod`, and the filesystem only tells the compiler where to find each module's code.
+
+```
+ PYTHON                              RUST
+ file exists ──► importable          file exists ──► ignored
+                                     `mod x;` in parent ──► compiled & in tree
+ `import` = load + bind name         `mod`  = declare/load (once, in the parent)
+                                     `use`  = create a shortcut name only
+```
+
+### How `mod` finds files
+
+When the compiler sees `mod stats;` in `src/lib.rs`, it looks for either:
+
+```
+src/stats.rs          ← modern style (Rust 2018+), preferred
+src/stats/mod.rs      ← older style, still valid (but never both)
+```
+
+When `src/stats.rs` contains `pub mod words;`, the compiler looks in `src/stats/words.rs`. The parent's file name becomes the folder name for its children.
+
+### Building the example
+
+**`src/lib.rs`** is the crate root, the top of the tree:
+
+```rust
+pub mod parse;     // public module → users of the library can reach it
+pub mod stats;
+mod render;        // private module → only usable inside this crate
+
+// Re-export: lets users write `textkit::word_count`
+// instead of `textkit::stats::words::word_count`
+pub use stats::words::word_count;
+
+/// Public entry point that uses the private `render` module.
+pub fn report(text: &str) -> String {
+    render::banner(text)
+}
+```
+
+**`src/stats.rs`**:
+
+```rust
+pub mod words;     // declares child module → loads src/stats/words.rs
+
+pub fn summary(text: &str) -> String {
+    // relative path: `words` is a child of the current module
+    format!("{} words", words::word_count(text))
+}
+```
+
+**`src/stats/words.rs`**:
+
+```rust
+pub fn word_count(text: &str) -> usize {
+    text.split_whitespace().filter(|w| is_word(w)).count()
+}
+
+// private helper: visible only in this module and its descendants
+fn is_word(s: &str) -> bool {
+    s.chars().any(char::is_alphanumeric)
+}
+```
+
+**`src/render.rs`**:
+
+```rust
+use crate::stats;  // absolute path, starting from the crate root
+
+pub(crate) fn banner(text: &str) -> String {
+    format!("== {} ==", stats::summary(text))
+}
+```
+
+**`src/parse.rs`**:
+
+```rust
+pub fn lines(text: &str) -> Vec<&str> {
+    text.lines().collect()
+}
+```
+
+The resulting **module tree** (this is the mental model to keep in your head, not the folder tree):
+
+```
+crate  (src/lib.rs)
+├── pub mod parse
+│   └── pub fn lines
+├── pub mod stats
+│   ├── pub fn summary
+│   └── pub mod words
+│       ├── pub fn word_count
+│       └──     fn is_word          ← private
+├──     mod render                  ← private module
+│       └── pub(crate) fn banner
+├── pub fn report
+└── pub use stats::words::word_count   ← re-export (alias)
+```
+
+## 4. Paths: naming things in the tree
+
+Every item has a path, like a file path, but using `::` as the separator.
+
+```
+crate::stats::words::word_count     absolute (from crate root)    ≈  /stats/words/...
+self::words::word_count             relative to current module    ≈  ./words/...
+super::summary                      parent module                 ≈  ../summary
+textkit::report                     from ANOTHER crate (by name)
+```
+
+`use` makes a local shortcut so you don't have to type long paths repeatedly:
+
+```rust
+use crate::stats::words::word_count;           // bring one item
+use crate::stats::{self, summary};             // stats AND stats::summary
+use std::collections::HashMap as Map;          // rename
+use std::io::prelude::*;                       // glob (use sparingly)
+```
+
+Two key points: `use` does not load or declare anything, and it applies only to the module where you write it (just like `using` in a single C# file).
+
+## 5. Privacy: private by default
+
+Everything is **private by default**. The visibility rule is easiest to picture as one-way glass:
+
+```
+            crate root
+           /          \
+       stats          render
+         |
+       words  ← fn is_word (private)
+
+ A child can see everything in its ANCESTORS (even private items).
+ A parent CANNOT see private items of its CHILDREN.
+
+   words  ──► can use private items in stats and the crate root  ✅
+   stats  ──► cannot call words::is_word                         ❌
+   render ──► can use `mod render` siblings declared at root     ✅
+```
+
+That's why `render.rs` can reach `crate::stats`: `stats` lives at the crate root, and `render` is a descendant of the root.
+
+You have finer control than just `pub` or private:
+
+```rust
+pub fn a() {}            // visible everywhere the parent module is visible
+pub(crate) fn b() {}     // visible anywhere in this crate, never outside ≈ C# `internal`
+pub(super) fn c() {}     // visible to the parent module only
+pub(in crate::stats) fn d() {}  // visible inside a specific ancestor module
+fn e() {}                // private: this module + its children
+```
+
+Two struct and enum rules often surprise people:
+
+```rust
+pub struct Patient {     // struct is public...
+    pub id: u32,         // ...but each FIELD is private unless marked pub
+    name: String,        // outside code can't read/construct this directly
+}
+
+pub enum Status {        // a public enum makes ALL its variants public
+    Active,
+    Archived,
+}
+```
+
+A struct with private fields can't be built with `Patient { .. }` from outside its module, so you provide a constructor like `Patient::new(...)`. This is how Rust enforces encapsulation, similar to private fields with a public constructor in C#.
+
+## 6. The lib + main pattern (recommended architecture)
+
+When a package has both `lib.rs` and `main.rs`, they are **two separate crates**. `main.rs` uses the library just like any outside user would, by its crate name:
+
+**`src/main.rs`**:
+
+```rust
+use textkit::{report, word_count};   // NOT `crate::` — different crate!
+
+fn main() {
+    let text = "Hello Rust modules";
+    println!("{}", report(text));
+    println!("count = {}", word_count(text));
+    // textkit::render::banner(text);  ❌ compile error: `render` is private
+}
+```
+
+```
+┌───────────── package: textkit ─────────────┐
+│                                             │
+│   main.rs (binary crate)                    │
+│     thin: parse args, call lib, print       │
+│              │                              │
+│              │ depends on (public API only) │
+│              ▼                              │
+│   lib.rs (library crate)                    │
+│     all real logic, unit-testable,          │
+│     reusable by other crates                │
+└─────────────────────────────────────────────┘
+```
+
+Keeping `main.rs` thin and putting the logic in `lib.rs` is the idiomatic approach. It makes the code testable, forces you to design a clear public API, and makes the binary easy to replace (CLI today, web server tomorrow). This fits nicely with dependency inversion and separation of concerns.
+
+## 7. Where tests live
+
+Rust has two test layers, and both follow the module rules above.
+
+```rust
+// Unit tests: inside the same file, as a child module
+// Being a child, `tests` CAN see private items like `is_word`.
+#[cfg(test)]          // compiled only for `cargo test`
+mod tests {
+    use super::*;     // pull in everything from the parent module
+
+    #[test]
+    fn private_helper_works() {
+        assert!(is_word("abc"));
+        assert!(!is_word("---"));
+    }
+}
+```
+
+```rust
+// tests/integration.rs: a SEPARATE crate, sees only the public API
+use textkit::word_count;
+
+#[test]
+fn counts_words() {
+    assert_eq!(word_count("a b c"), 3);
+}
+```
+
+## 8. Workspaces: multiple packages together
+
+When a project grows, you can split it into several packages under one workspace. They share a single `Cargo.lock` (consistent dependency versions) and one `target/` directory (faster builds).
+
+```
+textkit-workspace/
+├── Cargo.toml               ← workspace manifest (no [package])
+├── Cargo.lock               ← shared
+├── target/                  ← shared build output
+└── crates/
+    ├── core/                ← package "textkit-core" (library)
+    │   ├── Cargo.toml
+    │   └── src/lib.rs
+    └── cli/                 ← package "textkit-cli" (binary)
+        ├── Cargo.toml
+        └── src/main.rs
+```
+
+```toml
+# textkit-workspace/Cargo.toml
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/cli"]
+
+[workspace.dependencies]     # declare shared versions once
+serde = "1"
+```
+
+```toml
+# crates/cli/Cargo.toml
+[package]
+name = "textkit-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+textkit-core = { path = "../core" }     # depend on a sibling package
+serde = { workspace = true }            # inherit the shared version
+```
+
+Then `cargo build` at the root builds everything, and `cargo run -p textkit-cli` runs a specific package.
+
+## 9. Common pitfalls
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| "file not found for module" / code in a file is ignored | File exists but no `mod` declaration | Add `mod name;` in the parent file |
+| `use crate::foo` fails though `foo.rs` exists | `use` ≠ `mod` | Declare with `mod foo;` first, then `use` |
+| Same file loaded twice / weird duplicate types | `mod foo;` written in two places | Declare each module **once**, in its parent; elsewhere use `use` |
+| `crate::...` fails in `main.rs` | `main.rs` is a different crate from `lib.rs` | Use `your_crate_name::...` |
+| Can't construct a struct from outside | Fields are private | Mark fields `pub` or provide `new()` |
+
+## Summary
+
+```
+Workspace  ── groups packages      ── [workspace] in root Cargo.toml
+  Package  ── Cargo.toml           ── 0..1 lib crate + 0..N bin crates
+    Crate  ── compile unit         ── root: lib.rs / main.rs / bin/*.rs
+   Module  ── namespace tree       ── built by `mod`, mapped to files
+     Item  ── fn/struct/enum/trait ── private by default; `pub` to expose
+     `use` ── shortcut name only, never loads code
+```
+
+To lock this in, try a short exercise: run `cargo new textkit`, add a `lib.rs`, recreate the module tree above, and try to call `stats::words::is_word` from `main.rs`. Reading the compiler error you get is one of the fastest ways to absorb the privacy rules, since Rust's error messages usually tell you exactly which item is private and where.
+
