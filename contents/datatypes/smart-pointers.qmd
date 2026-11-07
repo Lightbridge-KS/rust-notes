@@ -1,0 +1,107 @@
+---
+title: "Smart Pointers (Box, Rc, Arc)"
+---
+
+In Rust, every value has **exactly one owner**, and the value is dropped when that owner goes out of scope. Smart pointers are structs that own heap data and add extra rules on top of that: `Box` gives single ownership on the heap, `Rc` gives shared ownership in one thread, and `Arc` gives shared ownership across threads.
+
+## 1. `Box<T>`: single owner, data on the heap
+
+```
+  Stack            Heap
+┌─────────┐      ┌───────┐
+│ b: ptr  │────▶ │   5   │
+└─────────┘      └───────┘
+ dropped when b leaves scope
+ → heap memory freed
+```
+
+```rust
+let b = Box::new(5);      // 5 lives on the heap
+println!("{}", b);        // auto-derefs like a normal value
+```
+
+`Box` has no runtime overhead beyond the allocation. You use it in three main situations:
+
+- **Recursive types.** Without `Box`, the compiler can't compute the type's size.
+  ```rust
+  enum List { Cons(i32, Box<List>), Nil }
+  ```
+- **Trait objects.** `Box<dyn Shape>` holds any type that implements `Shape`, similar to holding an interface reference in C#.
+- **Large data.** Moving a `Box` copies only the pointer, not the whole payload.
+
+## 2. `Rc<T>`: shared ownership with a reference count (single thread)
+
+When several parts of your code need to own the same data (for example, graph nodes or shared config), use `Rc`.
+
+```
+ a ──┐
+     │    ┌──────────────────┐
+ b ──┼──▶ │ strong_count = 3 │
+     │    │ data: "hello"    │
+ c ──┘    └──────────────────┘
+ count hits 0 → data dropped
+```
+
+```rust
+use std::rc::Rc;
+
+let a = Rc::new(String::from("hello"));
+let b = Rc::clone(&a);   // count += 1, no deep copy
+let c = Rc::clone(&a);
+println!("{}", Rc::strong_count(&a)); // 3
+```
+
+There are two important limits:
+
+- The data is **immutable** through an `Rc`.
+- `Rc` is **not thread-safe** because its counter isn't atomic. If you try to send it to another thread, the compiler rejects your code.
+
+If you know Python, this works like CPython's reference counting, except that Rust makes it explicit and opt-in.
+
+## 3. `Arc<T>`: atomic `Rc`, safe across threads
+
+`Arc` works the same way as `Rc`, but it updates the count with atomic CPU instructions. Those are slightly slower, but safe when several threads share the data.
+
+```
+ Thread 1 ──┐
+            │   ┌──────────────────────┐
+ Thread 2 ──┼─▶ │ atomic count = 3     │
+            │   │ data: Vec<i32>       │
+ Thread 3 ──┘   └──────────────────────┘
+```
+
+```rust
+use std::sync::Arc;
+use std::thread;
+
+let data = Arc::new(vec![1, 2, 3]);
+let handles: Vec<_> = (0..3).map(|i| {
+    let d = Arc::clone(&data);
+    thread::spawn(move || println!("{i}: {:?}", d))
+}).collect();
+for h in handles { h.join().unwrap(); }
+```
+
+## Adding mutability (common pairings)
+
+Since `Rc` and `Arc` give only shared read-only access, you wrap the data in a type that allows controlled mutation:
+
+```
+Single thread:  Rc<RefCell<T>>    borrow checked at runtime
+Multi-thread:   Arc<Mutex<T>>     lock before access
+                Arc<RwLock<T>>    many readers or one writer
+```
+
+One caution: two `Rc`s that point to each other never reach a count of 0, so the memory leaks. To break such cycles, make the back-reference (for example, child → parent) a `Weak<T>`.
+
+## Quick decision guide
+
+```
+Need heap / recursive type / dyn Trait?
+        └─▶ Box<T>
+Multiple owners?
+   ├─ one thread  ─▶ Rc<T>   (+RefCell to mutate)
+   └─ many threads─▶ Arc<T>  (+Mutex to mutate)
+```
+
+For comparison with C#: the .NET garbage collector lets every object be shared freely. Rust instead makes you **choose** a sharing strategy and pay only for what you use. `Box` is close to free, `Rc` adds a counter, and `Arc` adds an atomic counter.

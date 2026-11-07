@@ -1,0 +1,457 @@
+---
+title: "Macros in Rust"
+---
+
+A **macro** in Rust is code that writes code. It runs at **compile time**, takes a piece of your source code as input, and produces more source code that the compiler then compiles as if you had typed it yourself. You have already used macros: `println!`, `vec!`, `format!`, and `#[derive(Debug)]` are all macros. The `!` (or the `#[...]` attribute form) tells you that code generation is happening.
+
+## 1. Why Rust needs macros
+
+Rust functions are strict on purpose. Each one has a fixed number of parameters with fixed types, and there's no runtime reflection. That makes code safe and fast, but some things can't be written as plain functions:
+
+| Need | Why a function can't do it | Macro example |
+|---|---|---|
+| Variable number of arguments | Rust has no variadic functions | `println!("{} {}", a, b)` |
+| Checking at compile time | A function only sees runtime values | `format!` checks the `{}` placeholders against the arguments while compiling |
+| Generating `impl` blocks | Functions can't create types or trait impls | `#[derive(Clone, Debug)]` |
+| Small domain-specific languages | Function-call syntax is fixed | `html! { <div>...</div> }`, `sqlx::query!("SELECT ...")` |
+| Removing boilerplate | Repeating the same code for many types | `impl_from!(u8, u16, u32)` |
+
+## 2. Where macros run in the compiler
+
+Macros operate on **tokens**, very early in compilation, before any type checking:
+
+```
+ source.rs
+    │
+    ▼
+┌──────────┐   "let v = vec![1, 2];"
+│  Lexer   │ ─────────────────────────►  tokens: let · v · = · vec · ! · [ 1 , 2 ] · ;
+└──────────┘
+    │
+    ▼
+┌──────────────────────────┐
+│ Parser + MACRO EXPANSION │ ◄── macros run here: TokenStream in → TokenStream out
+│  (repeats until no       │     (expansion can produce more macro calls, which
+│   macro calls remain)    │      are expanded again)
+└──────────────────────────┘
+    │  AST with all macros expanded
+    ▼
+┌────────────────────┐
+│ Name resolution    │
+│ Type checking      │ ◄── generated code is checked like hand-written code
+│ Borrow checking    │
+└────────────────────┘
+    │
+    ▼
+  LLVM → machine code
+```
+
+Two consequences follow from this:
+
+- A macro **knows nothing about types**. It sees `x` as an identifier token. It cannot know whether `x` is an `i32` or a `String`.
+- After expansion, the generated code goes through **all** of Rust's normal checks. So a macro cannot produce code that breaks type safety or borrowing rules. The worst it can do is produce code that fails to compile.
+
+## 3. The two families
+
+```
+                         Rust Macros
+                              │
+           ┌──────────────────┴────────────────────┐
+           │                                       │
+   DECLARATIVE                              PROCEDURAL
+   macro_rules!                             (separate crate, proc-macro = true)
+   "match tokens against patterns,          "a Rust function that receives tokens
+    fill in a template"                      and returns tokens"
+           │                                       │
+   vec![..], println!(..)            ┌─────────────┼──────────────┐
+                                     │             │              │
+                                  derive       attribute     function-like
+                               #[derive(X)]   #[route(..)]     sql!(..)
+                               serde,         tokio::main     sqlx::query!
+                               thiserror
+```
+
+## 4. Declarative macros: `macro_rules!`
+
+This is the kind you'll write most often. A `macro_rules!` macro works much like a `match` expression, except that the arms match **code patterns** instead of values:
+
+```rust
+macro_rules! name {
+    ( pattern_1 ) => { expansion_1 };
+    ( pattern_2 ) => { expansion_2 };
+}
+```
+
+### A first example
+
+```rust
+macro_rules! say_hello {
+    () => {
+        println!("Hello!");
+    };
+    ($name:expr) => {
+        println!("Hello, {}!", $name);
+    };
+}
+
+fn main() {
+    say_hello!();          // matches arm 1
+    say_hello!("KS");      // matches arm 2: $name = "KS"
+}
+```
+
+`$name:expr` is a **metavariable**. It means "capture one expression and call it `$name`". The part after the colon is a **fragment specifier**.
+
+### Fragment specifiers
+
+| Specifier | Matches | Example input |
+|---|---|---|
+| `expr` | an expression | `1 + 2`, `foo()`, `x` |
+| `ident` | an identifier | `my_var`, `Point` |
+| `ty` | a type | `Vec<i32>`, `&str` |
+| `pat` | a pattern | `Some(x)`, `1..=5` |
+| `block` | a `{ ... }` block | `{ let a = 1; a }` |
+| `stmt` | a statement | `let x = 5` |
+| `item` | an item | `fn f() {}`, `struct S;` |
+| `path` | a path | `std::collections::HashMap` |
+| `literal` | a literal | `42`, `"hi"`, `true` |
+| `lifetime` | a lifetime | `'a` |
+| `vis` | a visibility (may be empty) | `pub`, `pub(crate)` |
+| `meta` | attribute contents | `derive(Debug)` |
+| `tt` | a single **token tree** (anything) | `+`, `foo`, `(a, b)` |
+
+`tt` is the "accept anything" option. A token tree is either a single token or a group of tokens inside `()`, `[]`, or `{}`.
+
+### Repetition: how `vec!` works
+
+The real power of `macro_rules!` comes from repetition, written `$( ... ) sep rep`:
+
+```
+$( $x:expr ),*
+│  └──┬───┘ │└── repetition operator:  *  = zero or more
+│     │     │                          +  = one or more
+│     │     │                          ?  = zero or one
+│     │     └─── separator token (here a comma)
+│     └───────── what one repetition matches
+└─────────────── start of repetition group
+```
+
+Here is your own `vec!`:
+
+```rust
+macro_rules! my_vec {
+    ( $( $x:expr ),* $(,)? ) => {      // $(,)? permits a trailing comma
+        {
+            let mut v = Vec::new();
+            $( v.push($x); )*           // repeat this line once per captured $x
+            v
+        }
+    };
+}
+
+let v = my_vec![10, 20, 30];
+```
+
+The expansion step by step:
+
+```
+my_vec![10, 20, 30]
+        │   │   │
+        ▼   ▼   ▼
+   $x = [10, 20, 30]   (one capture per repetition)
+
+expansion template:          generated code:
+{                            {
+  let mut v = Vec::new();      let mut v = Vec::new();
+  $( v.push($x); )*   ──►      v.push(10);
+                               v.push(20);
+                               v.push(30);
+  v                            v
+}                            }
+```
+
+The doubled braces `{ { ... } }` matter. The outer pair belongs to the macro arm's syntax, and the inner pair makes the output a **block expression**, so `let v = my_vec![...]` receives the final value of the block.
+
+### A practical one: `hashmap!` with custom syntax
+
+Macros let you invent syntax. The `=>` below is just a token the pattern expects to see:
+
+```rust
+macro_rules! hashmap {
+    ( $( $k:expr => $v:expr ),* $(,)? ) => {{
+        let mut map = ::std::collections::HashMap::new();
+        $( map.insert($k, $v); )*
+        map
+    }};
+}
+
+let modality_count = hashmap! {
+    "CT"  => 120,
+    "MRI" => 45,
+    "US"  => 300,
+};
+```
+
+Notice the full path `::std::collections::HashMap`. A macro should not assume the caller has written `use std::collections::HashMap`. Section 6 explains this.
+
+### Recursion
+
+A macro can call itself, which is how you process lists one item at a time:
+
+```rust
+macro_rules! max {
+    ($x:expr) => { $x };                       // base case: one item
+    ($x:expr, $($rest:expr),+) => {{          // recursive case
+        let a = $x;
+        let b = max!($($rest),+);
+        if a > b { a } else { b }
+    }};
+}
+
+let m = max!(3, 9, 2, 7);   // 9
+```
+
+```
+max!(3, 9, 2, 7)
+ └─ a=3, b = max!(9, 2, 7)
+             └─ a=9, b = max!(2, 7)
+                         └─ a=2, b = max!(7) → 7
+                         → 7
+             → 9
+ → 9
+```
+
+The `let a = $x;` line is deliberate. It evaluates each expression **once**. If you wrote `if $x > ... { $x }`, a call like `max!(expensive(), ...)` would run `expensive()` twice. That is a classic macro bug.
+
+## 5. Rust macros vs C macros
+
+If you have seen C's `#define`, Rust macros are much safer. C macros do plain text substitution, while Rust macros work on parsed syntax fragments:
+
+```rust
+macro_rules! square {
+    ($e:expr) => { $e * $e };
+}
+
+square!(1 + 1)   // Rust: (1+1) * (1+1) = 4  ✅  $e is captured as ONE expression node
+                 // C:     1+1 * 1+1   = 3  ❌  text pasted as-is
+```
+
+## 6. Hygiene
+
+Variables created inside a macro **cannot leak out**, and they can't accidentally capture the caller's variables either:
+
+```rust
+macro_rules! make_x {
+    () => { let x = 42; };
+}
+
+fn main() {
+    make_x!();
+    println!("{x}");   // ❌ error: cannot find value `x`
+}
+```
+
+The `x` inside the macro carries an invisible "syntax context" label, so it is a different `x` from the one in `main`. If you *want* the caller to name the variable, pass the identifier in:
+
+```rust
+macro_rules! make_var {
+    ($name:ident) => { let $name = 42; };
+}
+
+make_var!(x);
+println!("{x}");       // ✅ 42, because the identifier came from the caller
+```
+
+There is one subtlety. `macro_rules!` hygiene covers **local variables and labels only**. Paths to functions, types, and modules are resolved where the macro is *called*. That is why well-written macros use absolute paths:
+
+- `::std::collections::HashMap` instead of `HashMap`
+- `$crate::my_helper()` to refer to an item in the crate that defines the macro, wherever the macro gets used
+
+## 7. Scoping and exporting `macro_rules!`
+
+Macros follow some scoping rules that differ from everything else in Rust:
+
+```rust
+// Inside one crate: a macro is visible only AFTER its definition, in source order.
+mod macros {
+    #[macro_export]          // places the macro at the CRATE ROOT: my_crate::hashmap!
+    macro_rules! hashmap { /* ... */ }
+}
+
+// Another crate uses it like a normal item:
+use my_crate::hashmap;
+```
+
+Also note that `#[macro_export]` ignores the module the macro was defined in. The macro ends up at `crate::hashmap!`, not at `crate::macros::hashmap!`.
+
+## 8. Procedural macros
+
+When pattern matching isn't expressive enough, you write a **Rust function** that receives a `TokenStream` and returns a `TokenStream`. These functions must live in their own crate with a special crate type:
+
+```
+my_project/                   (Cargo workspace)
+├── Cargo.toml
+├── describe_derive/          ◄── proc-macro crate (compiled and run by the compiler)
+│   ├── Cargo.toml            [lib] proc-macro = true
+│   └── src/lib.rs
+└── app/                      ◄── normal crate that uses the macro
+    ├── Cargo.toml            [dependencies] describe_derive = { path = "../describe_derive" }
+    └── src/main.rs
+```
+
+Almost every proc macro uses two helper crates:
+
+- **`syn`** parses a `TokenStream` into a typed syntax tree (`DeriveInput`, `ItemFn`, and so on).
+- **`quote`** turns Rust-like templates back into a `TokenStream`. Inside a template, `#var` inserts a value.
+
+```
+TokenStream ──syn::parse──► typed AST ──your logic──► quote!{ ... } ──► TokenStream
+```
+
+### Example: a custom derive
+
+**`describe_derive/Cargo.toml`**
+```toml
+[package]
+name = "describe_derive"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = "2"
+quote = "1"
+```
+
+**`describe_derive/src/lib.rs`**
+```rust
+use proc_macro::TokenStream;
+use quote::quote;
+use syn::{parse_macro_input, Data, DeriveInput, Fields};
+
+/// Derives a `describe()` method that lists the struct's field names.
+#[proc_macro_derive(Describe)]
+pub fn derive_describe(input: TokenStream) -> TokenStream {
+    // 1. Parse the tokens into a typed syntax tree
+    let ast = parse_macro_input!(input as DeriveInput);
+    let name = &ast.ident;
+
+    // 2. Inspect the structure: collect the field names
+    let field_names: Vec<String> = match &ast.data {
+        Data::Struct(s) => match &s.fields {
+            Fields::Named(f) => f.named.iter()
+                .map(|f| f.ident.as_ref().unwrap().to_string())
+                .collect(),
+            _ => vec![],
+        },
+        _ => {
+            return syn::Error::new_spanned(name, "Describe only supports structs")
+                .to_compile_error()
+                .into();
+        }
+    };
+    let fields_joined = field_names.join(", ");
+
+    // 3. Handle generics correctly (e.g. struct Wrapper<T>)
+    let (impl_g, ty_g, where_c) = ast.generics.split_for_impl();
+
+    // 4. Generate the output code
+    let expanded = quote! {
+        impl #impl_g #name #ty_g #where_c {
+            pub fn describe() -> String {
+                format!("{} {{ {} }}", stringify!(#name), #fields_joined)
+            }
+        }
+    };
+    expanded.into()
+}
+```
+
+**`app/src/main.rs`**
+```rust
+use describe_derive::Describe;
+
+#[derive(Describe)]
+struct Study {
+    accession: String,
+    modality: String,
+    slice_count: u32,
+}
+
+fn main() {
+    println!("{}", Study::describe());
+    // Study { accession, modality, slice_count }
+}
+```
+
+Notice `syn::Error::new_spanned(...).to_compile_error()`. Good proc macros report errors this way, so the compiler points at the user's code with a clear message instead of panicking.
+
+### The three kinds of procedural macro
+
+```rust
+// 1. Derive: ADDS code next to the item (it cannot modify the item itself)
+#[proc_macro_derive(Describe, attributes(describe))]   // can also declare helper attributes
+pub fn f(item: TokenStream) -> TokenStream { ... }
+
+// 2. Attribute: REPLACES the item it's attached to
+//    #[timed] fn handler() {...}
+#[proc_macro_attribute]
+pub fn timed(attr: TokenStream, item: TokenStream) -> TokenStream { ... }
+//            └ tokens inside #[timed(...)]  └ the whole function/struct
+
+// 3. Function-like: looks like macro_rules! but is free to run any logic
+//    let q = sql!(SELECT * FROM studies);
+#[proc_macro]
+pub fn sql(input: TokenStream) -> TokenStream { ... }
+```
+
+Some real-world examples you'll meet soon:
+
+- `#[derive(Serialize, Deserialize)]` from **serde** is a derive macro.
+- `#[tokio::main]` is an attribute macro. It rewrites `async fn main` into a regular `fn main` that starts the async runtime.
+- `sqlx::query!("...")` is a function-like macro. It connects to your database **while compiling** and checks the SQL against the real schema.
+
+## 9. Mapping to languages you know
+
+| Concept | Closest relative | Key difference |
+|---|---|---|
+| `macro_rules!` | R's `bquote()` / rlang `!!` quasiquotation | R manipulates code **at runtime**. Rust does it once, at compile time, with no runtime cost. |
+| Capturing `$e:expr` unevaluated | R's lazy evaluation / `substitute()` | Same idea of "code as data", but Rust has no runtime environment to evaluate it in later. |
+| Attribute macros | Python decorators | Python decorators wrap functions at runtime. Rust attribute macros rewrite source code. |
+| Derive / proc macros | C# Source Generators, Dart `build_runner` + `json_serializable` | Very close in purpose. Rust's version is built into the compiler, so there's no separate build step and no `.g.dart` files. |
+
+## 10. Debugging macros
+
+Since macros generate invisible code, you need a way to look at the output:
+
+```zsh
+cargo install cargo-expand
+cargo expand              # print the whole crate with all macros expanded
+cargo expand main         # just one module
+```
+
+Running `cargo expand` on a plain `println!("hi")` is worthwhile: it shows how much code the macro produces.
+
+## 11. When to write a macro (and when not to)
+
+Since you care about clean architecture, here is the rule of thumb most experienced Rust developers follow:
+
+```
+Can a function do it?          → use a function
+Do generics/traits cover it?   → use generics/traits
+Still repetitive boilerplate,
+variadic syntax, or a DSL?     → macro_rules!
+Need to inspect struct fields,
+generate impls, or complex
+parsing?                       → procedural macro
+```
+
+Macros cost you in readability, IDE support (rust-analyzer handles them well, but not perfectly), compile time (proc macros especially, since `syn` is a large dependency), and error messages. Treat them like a power tool: excellent for removing whole categories of boilerplate, such as serde derives or a single `impl_from!` replacing 12 hand-written impls, but overkill for anything a plain function handles.
+
+## Practice exercises
+
+1. Write `my_assert_eq!(a, b)` that panics with both values printed when they differ. (Hint: use `$a:expr` and evaluate each side once.)
+2. Write `impl_area!(Circle, Square, Triangle)` that generates `impl Shape for X { fn name(&self) -> &str { stringify!(X) } }` for every type in the list. (Hint: `$( $t:ty ),*` and `stringify!`.)
+3. Run `cargo expand` on a small program that uses `#[derive(Debug)]` and read the generated `impl Debug`.
