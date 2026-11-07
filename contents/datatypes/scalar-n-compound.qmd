@@ -1,0 +1,261 @@
+---
+title: "Scalar and Compound Types in Rust"
+---
+
+Rust is **statically typed**, so every value's type is known at compile time. The compiler can usually infer it. You only add an annotation when more than one type would fit. All built-in primitive types fall into two families:
+
+```
+                     Rust built-in data types
+                               │
+            ┌──────────────────┴──────────────────┐
+         SCALAR                                COMPOUND
+   (exactly one value)                 (groups several values)
+            │                                     │
+  ┌───────┬─┴─────┬────────┐               ┌──────┴──────┐
+integer  float   bool     char           tuple         array
+i8..i128 f32     true     'a'        (i32, f64, char)  [i32; 5]
+u8..u128 f64     false    '🦀'        mixed types      one type
+isize/usize                           fixed length     fixed length
+```
+
+```rust
+let x = 5;        // inferred: i32 (the default integer type)
+let y = 2.0;      // inferred: f64 (the default float type)
+let n: u32 = "42".parse().expect("not a number"); // annotation REQUIRED:
+                  // parse() could produce many types, so you must say which
+```
+
+---
+
+## Part 1: Scalar types
+
+### 1.1 Integers
+
+An integer type name is a sign letter followed by a bit width.
+
+| Bits | Signed | Unsigned |
+|---|---|---|
+| 8 | `i8` | `u8` |
+| 16 | `i16` | `u16` |
+| 32 | `i32` (default) | `u32` |
+| 64 | `i64` | `u64` |
+| 128 | `i128` | `u128` |
+| pointer-sized | `isize` | `usize` |
+
+```
+Range formula
+  iN :  −2^(N−1)  …  2^(N−1) − 1      e.g. i8 : −128 … 127
+  uN :  0         …  2^N − 1          e.g. u8 :    0 … 255
+```
+
+`usize` and `isize` have the same width as a pointer, which is 64 bits on any modern Mac. Rust uses `usize` for every index and length, so `vec.len()` returns `usize`, and you'll see that type everywhere.
+
+There are several ways to write integer literals:
+
+```rust
+let a = 98_222;       // underscores are ignored; they just aid readability
+let b = 0xff;         // hex
+let c = 0o77;         // octal
+let d = 0b1111_0000;  // binary
+let e = b'A';         // byte literal, type u8, value 65
+let f = 255u8;        // type suffix
+```
+
+Overflow is where Rust differs most from Python. A Python `int` has unlimited size. A Rust integer has a fixed width, so you must decide what happens when a value goes past the edge:
+
+```rust
+let x: u8 = 255;
+// x + 1  →  debug build: PANIC ("attempt to add with overflow")
+//           release build: silently wraps to 0
+
+x.wrapping_add(1);     // 0            wrap on purpose
+x.checked_add(1);      // None         returns Option<u8>
+x.saturating_add(1);   // 255          clamp at the limit
+x.overflowing_add(1);  // (0, true)    the value plus an overflow flag
+```
+
+The idea behind these methods is that overflow behavior is part of your intent. Rust makes you state it instead of hiding it.
+
+### 1.2 Floating point
+
+There are two float types, `f32` and `f64`, and `f64` is the default. Both follow IEEE-754, the same standard as Python `float` and C# `double`.
+
+One gotcha: because of `NaN`, floats implement only partial ordering, so `Vec<f64>` has no `.sort()`:
+
+```rust
+let mut v = vec![3.2, 1.5, 2.8];
+// v.sort();                       // ❌ f64 doesn't implement Ord
+v.sort_by(|a, b| a.total_cmp(b));  // ✅
+```
+
+### 1.3 Numeric operations: no implicit mixing
+
+Coming from Python, R, or JS, this rule will bite you most often. **Rust never converts numeric types implicitly.**
+
+```rust
+let i: i32 = 10;
+let f: f64 = 2.5;
+// let z = i + f;           // ❌ error: cannot add `f64` to `i32`
+let z = i as f64 + f;       // ✅ 12.5
+```
+
+Integer division and remainder also behave differently from Python:
+
+```rust
+ 7 / 2     //  3
+-7 / 2     // -3   truncates toward zero (Python's -7 // 2 gives -4!)
+-7 % 2     // -1   (Python gives 1)
+(-7_i32).rem_euclid(2)   // 1   use this for Python-like modulo
+```
+
+Be careful with `as`, because it truncates without any warning. When the value might not fit, use `try_from`:
+
+```rust
+300_i32 as u8          // 44 (300 mod 256)  silent data loss
+u8::try_from(300_i32)  // Err(...)          safe, explicit
+```
+
+### 1.4 Boolean
+
+The `bool` type has two values, `true` and `false`, and takes 1 byte. Rust has no truthiness, unlike Python, JS, and R:
+
+```rust
+let n = 3;
+// if n { ... }       // ❌ expected `bool`, found integer
+if n != 0 { ... }     // ✅ say exactly what you mean
+```
+
+### 1.5 Character
+
+A `char` is **4 bytes** and holds one Unicode scalar value. Use single quotes for a `char` and double quotes for a string:
+
+```rust
+let c: char = 'z';
+let crab = '🦀';
+let s: &str = "z";    // this is a string slice, NOT a char
+```
+
+A string is not an array of chars. Strings are stored as UTF-8 bytes:
+
+```
+let s = "crab🦀";
+
+chars : 'c'  'r'  'a'  'b'  '🦀'
+bytes : 63   72   61   62   F0 9F A6 80
+
+s.chars().count() == 5    ← characters
+s.len()           == 8    ← BYTES, not characters
+```
+
+This is also different from C#, where `char` is a 2-byte UTF-16 unit and an emoji needs two of them.
+
+---
+
+## Part 2: Compound types
+
+### 2.1 Tuple
+
+A tuple has a fixed length, and its elements can have different types.
+
+```rust
+let tup: (i32, f64, char) = (500, 6.4, 'z');
+
+let (x, y, z) = tup;      // destructuring (pattern matching)
+let first = tup.0;        // dot-index with a literal number
+println!("{:?}", tup);    // tuples need {:?} (Debug), not {}
+```
+
+Why `tup.0` and not `tup[i]`? Each slot can hold a different type, and the compiler must know the type of every expression at compile time. So the index has to be a literal, not a runtime variable.
+
+Tuples are a common way to return several values:
+
+```rust
+fn div_rem(a: i32, b: i32) -> (i32, i32) {
+    (a / b, a % b)        // no semicolon, so this expression is the return value
+}
+let (q, r) = div_rem(17, 5);   // q = 3, r = 2
+```
+
+The empty tuple `()` is called the **unit type**. It plays the role of `void`, but it is a real value. A function that doesn't return anything actually returns `()`.
+
+Rust is also free to reorder tuple fields in memory. That detail is relevant if you care about architecture:
+
+```
+(i32, f64, u8)  with Rust's default layout, typically:
+
+┌───────────────┬────────┬────┬───────┐
+│   f64 (8 B)   │i32 (4) │ u8 │ pad 3 │  = 16 bytes
+└───────────────┴────────┴────┴───────┘
+
+The same fields in declared order (C-style layout) would need 24 bytes:
+│i32│pad 4│  f64  │u8│ pad 7 │
+```
+
+You can check the size yourself with `std::mem::size_of::<(i32, f64, u8)>()`.
+
+### 2.2 Array
+
+An array has a fixed length, every element has the same type, and it lives on the stack.
+
+```rust
+let a: [i32; 5] = [1, 2, 3, 4, 5];
+let zeros = [0; 5];       // [0, 0, 0, 0, 0]   (value; count)
+let first = a[0];
+let n = a.len();          // 5, and the type is usize
+```
+
+```
+a : [i32; 5]   → 20 contiguous bytes on the stack
+
+index:    0       1       2       3       4
+       ┌───────┬───────┬───────┬───────┬───────┐
+       │   1   │   2   │   3   │   4   │   5   │
+       └───────┴───────┴───────┴───────┴───────┘
+        4 bytes each
+```
+
+There are two important properties:
+
+1. **The length is part of the type.** `[i32; 3]` and `[i32; 4]` are different types and can't be swapped for each other.
+2. **Every index is bounds-checked.** In C, an out-of-bounds read silently returns garbage memory. In Rust, `a[10]` panics, which is safe. To avoid the panic, use `a.get(10)`, which returns `Option<&i32>`, i.e. `None`.
+
+Because arrays are fixed-size, you'll usually reach for one of these related types instead:
+
+```
+[T; N]   fixed size known at compile time, stack   (rare in everyday code)
+Vec<T>   growable, heap                            ≈ Python list, C# List<T>, Dart List
+&[T]     a borrowed "view" (slice) into either     ≈ C# Span<T>
+```
+
+---
+
+## Part 3: A preview of ownership
+
+Every scalar type is **`Copy`**. A tuple or array is also `Copy` when all of its elements are:
+
+```rust
+let a = [1, 2, 3];
+let b = a;              // the whole array is bit-copied
+println!("{:?}", a);    // ✅ a is still usable
+
+let v = vec![1, 2, 3];
+let w = v;              // a Vec is MOVED, not copied
+// println!("{:?}", v); // ❌ v was moved into w
+```
+
+This difference is the starting point for Rust's ownership system, which is the natural next topic.
+
+---
+
+## Quick comparison with languages you know
+
+| Concept | Rust | Python | C# |
+|---|---|---|---|
+| Default int | `i32`, overflow-checked in debug | `int`, unlimited size | `int`, 32-bit, wraps |
+| Default float | `f64` | `float` (64-bit) | `double` |
+| Implicit int→float | ❌ never | ✅ | ✅ (widening) |
+| Truthiness | ❌ | ✅ | ❌ |
+| `char` | 4 bytes, Unicode scalar | no char type | 2 bytes, UTF-16 unit |
+| Tuple | `(i32, f64)`, access with `.0` | `tuple`, access with `[0]` | `(int, double)`, access with `.Item1` |
+| Fixed array | `[T; N]`, length in the type, stack | — | `T[]`, heap, length not in the type |
+
