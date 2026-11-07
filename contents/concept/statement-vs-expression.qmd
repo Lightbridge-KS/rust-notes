@@ -1,0 +1,126 @@
+---
+title: "Statements vs Expressions in Rust"
+---
+
+
+The short version: an **expression** evaluates to a value, while a **statement** performs an action and produces no value. In Rust, almost everything is an expression, and the semicolon is what turns an expression into a statement.
+
+```
+            ┌──────────────────────────────┐
+            │          Expression          │
+            │  "computes and gives back    │
+            │       a value"               │
+            │   5 + 1      → 6             │
+            │   { 3 * 2 }  → 6             │
+            │   if c {1} else {2} → 1 or 2 │
+            └──────────────┬───────────────┘
+                           │  add a ;
+                           ▼
+            ┌──────────────────────────────┐
+            │          Statement           │
+            │  "does something, value      │
+            │   is thrown away"            │
+            │   5 + 1;     → (nothing)     │
+            └──────────────────────────────┘
+```
+
+## What counts as a statement?
+
+Rust has only a few kinds of statements. The first is a **`let` declaration** such as `let x = 5;`. The second is an **item declaration**, meaning a `fn`, `struct`, `enum`, `use`, and so on inside a block. The third is an **expression statement**, which is any expression followed by `;` so its value is discarded.
+
+Everything else is an expression: literals, arithmetic, function calls, macro calls, blocks `{ }`, `if`, `match`, and `loop`.
+
+Because `let` is a statement, it has no value you can capture:
+
+```rust
+let x = (let y = 6);   // ❌ error: expected expression, found `let` statement
+```
+
+This is different from C or JavaScript, where `x = y = 6` works. In Rust, even plain assignment `y = 6` is an expression, but its value is `()` (the "unit" type), so chaining it is useless.
+
+## Blocks are expressions
+
+A block `{ ... }` evaluates to its **last expression**, as long as that expression has no trailing semicolon:
+
+```rust
+let y = {
+    let x = 3;      // statement
+    x + 1           // expression → the block's value
+};
+// y == 4
+```
+
+```
+let y = {
+    let x = 3;   ← statement   (value discarded)
+    x + 1        ← tail expression (no ;)
+};                    │
+    ▲                 │
+    └──── 4 ──────────┘
+```
+
+If you write `x + 1;` instead, the block's value becomes `()`.
+
+## The semicolon trap in functions
+
+A function body is also a block, so its tail expression is the return value. You don't need `return` unless you are returning early:
+
+```rust
+fn plus_one(x: i32) -> i32 {
+    x + 1          // ✅ returns i32
+}
+
+fn plus_one_broken(x: i32) -> i32 {
+    x + 1;         // ❌ mismatched types: expected `i32`, found `()`
+}
+```
+
+This is one of the most common beginner errors. The compiler message is helpful, and it will usually suggest "remove this semicolon."
+
+## Control flow is expression-based
+
+Because `if` is an expression, Rust has no ternary operator `? :`; it doesn't need one:
+
+```rust
+let label = if score >= 50 { "pass" } else { "fail" };
+```
+
+Both branches must produce the same type. `if 1 {5} else {"six"}` won't compile.
+
+`match` works the same way:
+
+```rust
+let size = match bytes {
+    0           => "empty",
+    1..=1023    => "small",
+    _           => "large",
+};
+```
+
+Even `loop` can produce a value through `break`:
+
+```rust
+let mut counter = 0;
+let result = loop {
+    counter += 1;
+    if counter == 10 {
+        break counter * 2;   // loop evaluates to 20
+    }
+};
+```
+
+## Comparing to languages you know
+
+| Language | `if` is... | Last expression auto-returned? |
+|---|---|---|
+| **R** | expression | ✅ yes, in functions and `{}` |
+| **Rust** | expression | ✅ yes, if no trailing `;` |
+| Python | statement (plus a separate `a if c else b` expression) | ❌ needs `return` |
+| C# / Dart / JS | statement (plus `? :` and C#'s `switch` expression) | ❌ needs `return` (except arrow/lambda bodies) |
+
+Coming from R, Rust's model will feel familiar: in R, `y <- { x <- 3; x + 1 }` also gives `4`, and a function returns its last value. The main new rule is the semicolon. In R it is just a separator, but in Rust it actively **discards** the value.
+
+## Mental model to remember
+
+Think of `;` as an operator meaning "evaluate this, then throw the result away and give `()`." Once you see it that way, the rules for blocks, functions, and `if`/`match` all follow from that one idea.
+

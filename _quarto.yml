@@ -49,6 +49,8 @@ book:
          href: "contents/concept/coercion.qmd"
        - text: Static vs Dyn dispatch
          href: "contents/concept/static-vs-dyn-dispatch.qmd"
+       - text: Statement vs Expression
+         href: "contents/concept/statement-vs-expression.qmd"
     - part: Tooling
       chapters: 
         - text: Cargo Commands
