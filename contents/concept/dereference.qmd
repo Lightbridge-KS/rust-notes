@@ -1,0 +1,75 @@
+---
+title: "dereference operator"
+---
+
+`*` is the **dereference operator**: given a reference (a pointer), it follows that pointer to reach the **value it points to**. It's the opposite of `&`, which creates a reference.
+
+```
+let x = 5;
+let r = &x;      // r is a reference (&i32) to x
+
+  Stack
+  ┌────────────┐
+  │ x: 5       │ ◄──┐
+  ├────────────┤    │  r holds x's address
+  │ r: 0x7ff…  │ ───┘
+  └────────────┘
+
+  r   → the address (type &i32)
+  *r  → follow it → 5 (type i32)
+```
+
+### Why you need it
+
+In Rust, a reference is a separate type from the value, so you can't mix them freely:
+
+```rust
+let x = 5;
+let r = &x;
+
+assert_eq!(*r, 5);   // ✅ i32 == i32
+// assert_eq!(r, 5); // ❌ can't compare &i32 with i32
+```
+
+It's also how you **modify a value through a mutable reference**:
+
+```rust
+let mut count = 0;
+let r = &mut count;
+*r += 1;              // change the value r points to
+println!("{count}");  // 1
+```
+
+Writing `r += 1` would mean "add 1 to the reference itself," which makes no sense, so the compiler rejects it.
+
+### Why you rarely see `*` in practice
+
+Rust dereferences automatically in common cases:
+
+- **Method calls** use auto-deref. With `let s = &String::from("hi");`, `s.len()` works without writing `(*s).len()`.
+- **Printing** with `println!("{r}")` shows `5`, not an address.
+- **Deref coercion** turns `&String` into `&str` and `&Vec<T>` into `&[T]` when a function expects them.
+
+### Beyond plain references: smart pointers
+
+`*` also works on types that implement the **`Deref` trait**, such as `Box<T>`:
+
+```rust
+let b = Box::new(10);   // 10 lives on the heap
+let y = *b + 1;         // deref the Box → 10, so y = 11
+```
+
+### One gotcha: moving out
+
+`*` lets you **read** a `Copy` value (like `i32`) or **write** through `&mut`. However, you can't **move** a non-`Copy` value out of a borrow:
+
+```rust
+let s = String::from("hi");
+let r = &s;
+// let t = *r;      // ❌ cannot move out of a reference
+let t = r.clone();  // ✅ make a copy instead
+```
+
+### Mental model from your other languages
+
+In C# and Python, object references are dereferenced invisibly; you never write `*`. Rust makes the "pointer vs. value" distinction explicit in the type system (`&T` vs. `T`). This is what lets the borrow checker reason about who owns what. It is closest to C#'s `unsafe` pointers (`int* p; *p = 5;`), but safe and checked at compile time.

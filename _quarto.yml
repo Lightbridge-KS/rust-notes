@@ -37,6 +37,8 @@ book:
          href: "contents/concept/rust-ownership.qmd"
        - text: Onewriter XOR Manyreader
          href: "contents/concept/onewriter-xor-manyreader.qmd"
+       - text: Dereference 
+         href: "contents/concept/dereference.qmd"
        - text: Coercion
          href: "contents/concept/coercion.qmd"
        - text: Static vs Dyn dispatch
